@@ -69,7 +69,7 @@ function sanitizeForContext(text: string): string {
     .replace(/>/g, "\uFF1E")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 300);
+    .slice(0, 600);
 }
 
 // ============================================================================
