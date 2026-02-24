@@ -108,7 +108,7 @@ export class MemoryStore {
       };
 
       try {
-        table = await db.createTable(TABLE_NAME, [schemaEntry]);
+        table = await db.createTable(TABLE_NAME, [schemaEntry as unknown as Record<string, unknown>]);
         await table.delete('id = "__schema__"');
       } catch (createErr) {
         if (String(createErr).includes("already exists")) {
@@ -171,7 +171,7 @@ export class MemoryStore {
       metadata: entry.metadata || "{}",
     };
 
-    await this.table!.add([fullEntry]);
+    await this.table!.add([fullEntry as unknown as Record<string, unknown>]);
     return fullEntry;
   }
 
@@ -197,7 +197,7 @@ export class MemoryStore {
       metadata: entry.metadata || "{}",
     };
 
-    await this.table!.add([full]);
+    await this.table!.add([full as unknown as Record<string, unknown>]);
     return full;
   }
 
@@ -459,7 +459,7 @@ export class MemoryStore {
 
     const resolvedId = escapeSqlLiteral(row.id as string);
     await this.table!.delete(`id = '${resolvedId}'`);
-    await this.table!.add([updated]);
+    await this.table!.add([updated as unknown as Record<string, unknown>]);
 
     return updated;
   }

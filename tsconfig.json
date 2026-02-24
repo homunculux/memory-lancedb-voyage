@@ -11,6 +11,6 @@
     "declaration": true,
     "sourceMap": true
   },
-  "include": ["index.ts", "src/**/*.ts", "cli.ts"],
+  "include": ["index.ts", "src/**/*.ts", "cli.ts", "types/**/*.d.ts"],
   "exclude": ["node_modules", "dist"]
 }
