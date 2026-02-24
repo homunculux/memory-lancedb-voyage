@@ -73,6 +73,210 @@ function sanitizeForContext(text: string): string {
 }
 
 // ============================================================================
+// LLM-based Capture Judgment
+// ============================================================================
+
+const CAPTURE_JUDGMENT_PROMPT = `你是記憶管理員。分析以下對話，判斷是否包含值得長期記住的資訊。
+
+值得記住的：
+- 重要決策及其原因
+- 技術教訓和踩坑經驗
+- 用戶偏好和習慣
+- 專案里程碑和成果
+- 關係和互動模式
+- 有智慧價值的洞察
+
+不值得記住的：
+- 日常問候和閒聊
+- 純操作步驟（git push, npm install）
+- 已經記錄過的重複資訊
+- 臨時性的狀態查詢
+
+如果值得記住，回傳 JSON：
+{"store": true, "memories": [{"text": "精煉的記憶文字", "category": "fact|decision|preference|entity|other", "importance": 0.5-1.0}]}
+
+如果不值得，回傳：
+{"store": false}
+
+只回傳 JSON，不要任何其他文字。`;
+
+type LlmMemoryJudgment =
+  | { store: false }
+  | { store: true; memories: Array<{ text: string; category: string; importance: number }> };
+
+async function callLlmForCaptureJudgment(
+  conversationText: string,
+  model: string,
+  logger: { info: (msg: string) => void; warn: (msg: string) => void; debug?: (msg: string) => void },
+): Promise<LlmMemoryJudgment | null> {
+  // Try OpenClaw gateway first (localhost:3000), then fallback to localhost:8080
+  const gatewayUrls = [
+    process.env.OPENCLAW_GATEWAY_URL || "http://localhost:3000",
+    "http://localhost:8080",
+  ];
+
+  const requestBody = JSON.stringify({
+    model,
+    messages: [
+      { role: "system", content: CAPTURE_JUDGMENT_PROMPT },
+      { role: "user", content: conversationText.slice(0, 4000) },
+    ],
+    max_tokens: 1024,
+    temperature: 0,
+  });
+
+  for (const baseUrl of gatewayUrls) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
+
+      const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: requestBody,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        logger.debug?.(`memory-lancedb-voyage: LLM gateway ${baseUrl} returned ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json() as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+
+      const content = data.choices?.[0]?.message?.content?.trim();
+      if (!content) {
+        logger.warn("memory-lancedb-voyage: LLM returned empty content");
+        return null;
+      }
+
+      // Extract JSON from response (handle possible markdown code blocks)
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        logger.warn(`memory-lancedb-voyage: LLM response not valid JSON: ${content.slice(0, 200)}`);
+        return null;
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]) as LlmMemoryJudgment;
+
+      // Validate structure
+      if (typeof parsed.store !== "boolean") {
+        logger.warn("memory-lancedb-voyage: LLM response missing 'store' boolean");
+        return null;
+      }
+
+      if (parsed.store && (!Array.isArray(parsed.memories) || parsed.memories.length === 0)) {
+        logger.warn("memory-lancedb-voyage: LLM said store=true but no memories array");
+        return null;
+      }
+
+      if (parsed.store) {
+        // Validate and sanitize each memory entry
+        const validCategories = new Set(["fact", "decision", "preference", "entity", "other"]);
+        for (const mem of parsed.memories) {
+          if (typeof mem.text !== "string" || mem.text.length === 0) return null;
+          if (!validCategories.has(mem.category)) mem.category = "other";
+          if (typeof mem.importance !== "number" || mem.importance < 0.5 || mem.importance > 1.0) {
+            mem.importance = 0.7;
+          }
+        }
+      }
+
+      return parsed;
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes("abort")) {
+        logger.warn("memory-lancedb-voyage: LLM call timed out (10s)");
+        return null;
+      }
+      logger.debug?.(`memory-lancedb-voyage: LLM gateway ${baseUrl} failed: ${errMsg}`);
+      continue;
+    }
+  }
+
+  logger.warn("memory-lancedb-voyage: all LLM gateway URLs failed, falling back to heuristic");
+  return null;
+}
+
+// ============================================================================
+// Conversation Buffer (sliding window for LLM context)
+// ============================================================================
+
+interface BufferEntry {
+  role: string;
+  text: string;
+  turnIndex: number;
+}
+
+class ConversationBuffer {
+  private entries: BufferEntry[] = [];
+  private turnCounter = 0;
+  private _lastJudgedTurn = -1;
+  private readonly maxEntries: number;
+  private readonly maxChars: number;
+
+  constructor(maxEntries = 20, maxChars = 3000) {
+    this.maxEntries = maxEntries;
+    this.maxChars = maxChars;
+  }
+
+  /** Append messages from one agent_end turn. Returns the turn index. */
+  appendTurn(messages: Array<{ role: string; text: string }>): number {
+    const turn = this.turnCounter++;
+    for (const msg of messages) {
+      this.entries.push({ role: msg.role, text: msg.text, turnIndex: turn });
+    }
+    this.trim();
+    return turn;
+  }
+
+  /** Get the full buffer as formatted text (for LLM context). */
+  getFullContext(): string {
+    return this.entries.map(e => `${e.role}: ${e.text}`).join("\n");
+  }
+
+  /** Get only new entries since lastJudgedTurn (for the "new content" portion). */
+  getNewContent(): string {
+    return this.entries
+      .filter(e => e.turnIndex > this._lastJudgedTurn)
+      .map(e => `${e.role}: ${e.text}`)
+      .join("\n");
+  }
+
+  /** Check if there's new content to judge. */
+  hasNewContent(): boolean {
+    return this.entries.some(e => e.turnIndex > this._lastJudgedTurn);
+  }
+
+  /** Mark current content as judged. */
+  markJudged(): void {
+    this._lastJudgedTurn = this.turnCounter - 1;
+  }
+
+  get lastJudgedTurn(): number {
+    return this._lastJudgedTurn;
+  }
+
+  /** Trim buffer to stay within limits. */
+  private trim(): void {
+    // Trim by entry count
+    while (this.entries.length > this.maxEntries) {
+      this.entries.shift();
+    }
+    // Trim by total character count
+    let totalChars = this.entries.reduce((sum, e) => sum + e.text.length, 0);
+    while (totalChars > this.maxChars && this.entries.length > 1) {
+      const removed = this.entries.shift();
+      if (removed) totalChars -= removed.text.length;
+    }
+  }
+}
+
+// ============================================================================
 // Session Content Reading
 // ============================================================================
 
@@ -183,6 +387,7 @@ const memoryLanceDBVoyagePlugin = {
     }, config.embedding.apiKey);
     const scopeManager = createScopeManager(config.scopes);
     const migrator = createMigrator(store);
+    const captureBuffer = new ConversationBuffer(20, 3000);
 
     api.logger.info(
       `memory-lancedb-voyage: registered (db: ${resolvedDbPath}, model: ${config.embedding.model})`,
@@ -255,17 +460,19 @@ const memoryLanceDBVoyagePlugin = {
         try {
           const agentId = ctx?.agentId || "main";
           const defaultScope = scopeManager.getDefaultScope(agentId);
+          const parsedMessages: Array<{ role: string; text: string }> = [];
           const texts: string[] = [];
 
           for (const msg of event.messages) {
             if (!msg || typeof msg !== "object") continue;
             const msgObj = msg as Record<string, unknown>;
-            const role = msgObj.role;
+            const role = msgObj.role as string;
             if (role !== "user" && !(config.captureAssistant && role === "assistant")) continue;
 
             const content = msgObj.content;
             if (typeof content === "string") {
               texts.push(content);
+              parsedMessages.push({ role, text: content });
               continue;
             }
             if (Array.isArray(content)) {
@@ -273,28 +480,89 @@ const memoryLanceDBVoyagePlugin = {
                 if (block && typeof block === "object" && "type" in block &&
                     (block as Record<string, unknown>).type === "text" &&
                     "text" in block && typeof (block as Record<string, unknown>).text === "string") {
-                  texts.push((block as Record<string, unknown>).text as string);
+                  const blockText = (block as Record<string, unknown>).text as string;
+                  texts.push(blockText);
+                  parsedMessages.push({ role, text: blockText });
                 }
               }
             }
           }
 
-          const toCapture = texts.filter((text) => text && shouldCapture(text, { maxChars: config.captureMaxChars }));
-          if (toCapture.length === 0) return;
+          // Always append to conversation buffer (even if heuristic doesn't pass,
+          // the context is valuable for future LLM judgments)
+          if (parsedMessages.length > 0) {
+            captureBuffer.appendTurn(parsedMessages);
+          }
 
+          // First-pass heuristic filter (quick: skip too short/long/irrelevant)
+          const heuristicPassed = texts.filter((text) => text && shouldCapture(text, { maxChars: config.captureMaxChars }));
+          if (heuristicPassed.length === 0) return;
+
+          // LLM judgment layer (if enabled)
+          if (config.captureLlm && captureBuffer.hasNewContent()) {
+            // Build LLM input: full buffer as context + highlight new content
+            const fullContext = captureBuffer.getFullContext();
+            const newContent = captureBuffer.getNewContent();
+            const llmInput = fullContext === newContent
+              ? `對話內容：\n${fullContext}`
+              : `完整對話上下文：\n${fullContext}\n\n---\n請特別關注以下新增內容（判斷是否值得記憶）：\n${newContent}`;
+
+            const judgment = await callLlmForCaptureJudgment(
+              llmInput,
+              config.captureLlmModel,
+              api.logger,
+            );
+
+            // Mark as judged regardless of outcome (avoid re-judging same content)
+            captureBuffer.markJudged();
+
+            if (judgment !== null) {
+              // LLM responded successfully
+              if (!judgment.store) {
+                api.logger.debug?.(`memory-lancedb-voyage: LLM decided not to store (scope: ${defaultScope})`);
+                return;
+              }
+
+              // LLM said store=true — use LLM-refined memories
+              let stored = 0;
+              for (const mem of judgment.memories.slice(0, 5)) {
+                const memText = `[auto-captured] ${mem.text}`;
+                const category = (mem.category as "fact" | "decision" | "preference" | "entity" | "other") || "other";
+                const importance = mem.importance;
+
+                const vector = await embedder.embedPassage(memText);
+                const existing = await store.vectorSearch(vector, 1, 0.1, [defaultScope]);
+                if (existing.length > 0 && existing[0].score > 0.95) continue;
+
+                await store.store({ text: memText, vector, importance, category, scope: defaultScope });
+                stored++;
+              }
+
+              if (stored > 0) {
+                api.logger.info(`memory-lancedb-voyage: LLM auto-captured ${stored} memories in scope ${defaultScope}`);
+              }
+              return;
+            }
+
+            // LLM call failed — fall through to heuristic fallback
+            api.logger.debug?.("memory-lancedb-voyage: LLM fallback to heuristic capture");
+          }
+
+          // Heuristic fallback (original logic, also used when captureLlm=false)
           let stored = 0;
-          for (const text of toCapture.slice(0, 3)) {
+          for (const text of heuristicPassed.slice(0, 3)) {
+            const prefixedText = config.captureLlm ? `[auto-captured] ${text}` : text;
             const category = detectCategory(text);
-            const vector = await embedder.embedPassage(text);
+            const vector = await embedder.embedPassage(prefixedText);
             const existing = await store.vectorSearch(vector, 1, 0.1, [defaultScope]);
             if (existing.length > 0 && existing[0].score > 0.95) continue;
 
-            await store.store({ text, vector, importance: 0.7, category, scope: defaultScope });
+            await store.store({ text: prefixedText, vector, importance: 0.7, category, scope: defaultScope });
             stored++;
           }
 
           if (stored > 0) {
-            api.logger.info(`memory-lancedb-voyage: auto-captured ${stored} memories in scope ${defaultScope}`);
+            api.logger.info(`memory-lancedb-voyage: auto-captured ${stored} memories in scope ${defaultScope} (heuristic)`);
           }
         } catch (err) {
           api.logger.warn(`memory-lancedb-voyage: capture failed: ${String(err)}`);

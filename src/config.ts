@@ -25,6 +25,8 @@ export interface PluginConfig {
   autoRecall: boolean;
   captureAssistant: boolean;
   captureMaxChars: number;
+  captureLlm: boolean;
+  captureLlmModel: string;
   enableManagementTools: boolean;
   retrieval: {
     mode: "hybrid" | "vector";
@@ -160,6 +162,10 @@ export const memoryConfigSchema = {
       autoRecall: cfg.autoRecall !== false,
       captureAssistant: cfg.captureAssistant === true,
       captureMaxChars: captureMaxChars ?? DEFAULT_CAPTURE_MAX_CHARS,
+      captureLlm: cfg.captureLlm !== false,
+      captureLlmModel: typeof cfg.captureLlmModel === "string"
+        ? cfg.captureLlmModel
+        : "anthropic/claude-haiku-4-5-20251001",
       enableManagementTools: cfg.enableManagementTools === true,
       retrieval: {
         mode: ret.mode === "vector" ? "vector" : "hybrid",
