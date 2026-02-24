@@ -1,0 +1,290 @@
+{
+  "id": "memory-lancedb-voyage",
+  "name": "Memory (LanceDB + Voyage AI)",
+  "description": "LanceDB-backed long-term memory with hybrid retrieval, Voyage AI embedding & reranking, multi-scope isolation",
+  "version": "2026.2.25",
+  "kind": "memory",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "embedding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "apiKey": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string",
+            "default": "voyage-3-large"
+          },
+          "dimensions": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "inputType": {
+            "type": "string",
+            "enum": ["query", "document"],
+            "description": "Voyage AI input_type parameter for task-aware embeddings"
+          }
+        },
+        "required": ["apiKey"]
+      },
+      "dbPath": {
+        "type": "string"
+      },
+      "enableManagementTools": {
+        "type": "boolean",
+        "default": false,
+        "description": "Enable memory_list and memory_stats management tools"
+      },
+      "autoCapture": {
+        "type": "boolean"
+      },
+      "autoRecall": {
+        "type": "boolean"
+      },
+      "captureAssistant": {
+        "type": "boolean"
+      },
+      "retrieval": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["hybrid", "vector"],
+            "default": "hybrid"
+          },
+          "vectorWeight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.7
+          },
+          "bm25Weight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.3
+          },
+          "minScore": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.3
+          },
+          "rerank": {
+            "type": "string",
+            "enum": ["cross-encoder", "lightweight", "none"],
+            "default": "cross-encoder"
+          },
+          "rerankModel": {
+            "type": "string",
+            "default": "rerank-2",
+            "description": "Voyage AI reranker model name"
+          },
+          "candidatePoolSize": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 100,
+            "default": 20
+          },
+          "recencyHalfLifeDays": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 365,
+            "default": 14,
+            "description": "Half-life in days for recency boost. Newer memories get higher scores. Set 0 to disable."
+          },
+          "recencyWeight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 0.5,
+            "default": 0.1,
+            "description": "Maximum recency boost factor added to score"
+          },
+          "filterNoise": {
+            "type": "boolean",
+            "default": true,
+            "description": "Filter out noise memories (agent denials, meta-questions, boilerplate)"
+          },
+          "lengthNormAnchor": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5000,
+            "default": 500,
+            "description": "Length normalization anchor in chars. Entries longer than this get score penalized. Set 0 to disable."
+          },
+          "hardMinScore": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.35,
+            "description": "Hard cutoff after all scoring stages. Results below this score are discarded."
+          },
+          "timeDecayHalfLifeDays": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 365,
+            "default": 60,
+            "description": "Time decay half-life in days. Old entries lose score gradually. Floor at 0.5x. Set 0 to disable."
+          }
+        }
+      },
+      "sessionMemory": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Store session summaries to LanceDB on /new command"
+          },
+          "messageCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 15,
+            "description": "Number of recent messages to include in session summary"
+          }
+        }
+      },
+      "scopes": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "default": {
+            "type": "string",
+            "default": "global"
+          },
+          "definitions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "agentAccess": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "required": ["embedding"]
+  },
+  "uiHints": {
+    "embedding.apiKey": {
+      "label": "Voyage AI API Key",
+      "sensitive": true,
+      "placeholder": "pa-... or ${VOYAGE_API_KEY}",
+      "help": "API key for Voyage AI (used for both embeddings and reranking)"
+    },
+    "embedding.model": {
+      "label": "Embedding Model",
+      "placeholder": "voyage-3-large",
+      "help": "Voyage AI embedding model (voyage-3-large, voyage-3, voyage-3-lite, voyage-code-3)"
+    },
+    "embedding.dimensions": {
+      "label": "Vector Dimensions",
+      "placeholder": "auto-detected from model",
+      "help": "Override vector dimensions for custom models not in the built-in lookup table",
+      "advanced": true
+    },
+    "dbPath": {
+      "label": "Database Path",
+      "placeholder": "~/.openclaw/memory/lancedb-voyage",
+      "help": "Directory path for the LanceDB database files",
+      "advanced": true
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically capture important information from conversations"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Automatically inject relevant memories into context"
+    },
+    "captureAssistant": {
+      "label": "Capture Assistant Messages",
+      "help": "Also auto-capture assistant messages (default false to reduce memory pollution)",
+      "advanced": true
+    },
+    "retrieval.mode": {
+      "label": "Retrieval Mode",
+      "help": "Use hybrid search (vector + BM25) or vector-only",
+      "advanced": true
+    },
+    "retrieval.rerank": {
+      "label": "Reranking Mode",
+      "help": "Re-score fused results for better quality (cross-encoder uses Voyage rerank-2 API)",
+      "advanced": true
+    },
+    "retrieval.rerankModel": {
+      "label": "Reranker Model",
+      "placeholder": "rerank-2",
+      "help": "Voyage AI reranker model name",
+      "advanced": true
+    },
+    "retrieval.candidatePoolSize": {
+      "label": "Candidate Pool Size",
+      "help": "Number of candidates to fetch before fusion and reranking",
+      "advanced": true
+    },
+    "sessionMemory.enabled": {
+      "label": "Session Memory",
+      "help": "Store session summaries to LanceDB when /new is triggered"
+    },
+    "sessionMemory.messageCount": {
+      "label": "Session Message Count",
+      "help": "Number of recent messages to include in session summaries",
+      "advanced": true
+    },
+    "scopes.default": {
+      "label": "Default Scope",
+      "help": "Default memory scope for new memories",
+      "advanced": true
+    },
+    "scopes.definitions": {
+      "label": "Scope Definitions",
+      "help": "Define custom memory scopes with descriptions",
+      "advanced": true
+    },
+    "scopes.agentAccess": {
+      "label": "Agent Access Control",
+      "help": "Define which scopes each agent can access",
+      "advanced": true
+    },
+    "enableManagementTools": {
+      "label": "Management Tools",
+      "help": "Enable memory_list and memory_stats tools for debugging and auditing",
+      "advanced": true
+    },
+    "retrieval.lengthNormAnchor": {
+      "label": "Length Normalization Anchor",
+      "help": "Entries longer than this (chars) get score penalized. 0 = disabled.",
+      "advanced": true
+    },
+    "retrieval.hardMinScore": {
+      "label": "Hard Minimum Score",
+      "help": "Discard results below this score after all scoring stages.",
+      "advanced": true
+    },
+    "retrieval.timeDecayHalfLifeDays": {
+      "label": "Time Decay Half-Life",
+      "help": "Old entries lose score over this many days. Floor at 0.5x. 0 = disabled.",
+      "advanced": true
+    }
+  }
+}
