@@ -165,7 +165,7 @@ Vidya can automatically capture important information from conversations. When `
 {
   "captureLlm": true,
   "captureLlmModel": "anthropic/claude-haiku-4-5-20251001",
-  "captureLlmUrl": "https://api.openai.com/v1"
+  "captureLlmUrl": "https://api.openai.com"
 }
 ```
 

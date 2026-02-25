@@ -217,7 +217,7 @@ export const memoryConfigSchema = {
         ? cfg.captureLlmModel
         : "anthropic/claude-haiku-4-5-20251001",
       captureLlmUrl: typeof cfg.captureLlmUrl === "string"
-        ? cfg.captureLlmUrl
+        ? cfg.captureLlmUrl.trim().replace(/\/v1\/?$/, "").replace(/\/$/, "")
         : "",
       enableManagementTools: cfg.enableManagementTools === true,
       retrieval: {

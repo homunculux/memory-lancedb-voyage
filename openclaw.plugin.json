@@ -77,7 +77,7 @@
       },
       "captureLlmUrl": {
         "type": "string",
-        "description": "Custom LLM endpoint URL for capture judgment. Defaults to OpenClaw gateway (localhost:3000)."
+        "description": "Base URL for LLM capture judgment (e.g. http://localhost:3000). The plugin appends /v1/chat/completions automatically."
       },
       "retrieval": {
         "type": "object",
