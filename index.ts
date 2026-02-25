@@ -9,6 +9,7 @@ import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 
 import { MemoryStore } from "./src/store.js";
 import { createEmbedder, getVectorDimensions } from "./src/embedder.js";
+import { createEmbedderFromConfig } from "./src/embedder-factory.js";
 import { createRetriever, DEFAULT_RETRIEVAL_CONFIG } from "./src/retriever.js";
 import { createScopeManager } from "./src/scopes.js";
 import { createMigrator } from "./src/migrate.js";
@@ -375,10 +376,12 @@ const memoryLanceDBVoyagePlugin = {
 
     // Initialize core components
     const store = new MemoryStore({ dbPath: resolvedDbPath, vectorDim });
-    const embedder = createEmbedder({
+    const embedder = createEmbedderFromConfig({
+      provider: config.embedding.provider,
       apiKey: config.embedding.apiKey,
       model: config.embedding.model,
       dimensions: config.embedding.dimensions,
+      baseUrl: config.embedding.baseUrl,
     });
     // Pass same Voyage API key for reranking
     const retriever = createRetriever(store, embedder, {

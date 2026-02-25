@@ -14,11 +14,15 @@ import { join } from "node:path";
 export const MEMORY_CATEGORIES = ["preference", "fact", "decision", "entity", "other"] as const;
 export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
 
+export type EmbeddingProvider = "voyage" | "openai" | "jina";
+
 export interface PluginConfig {
   embedding: {
+    provider: EmbeddingProvider;
     apiKey: string;
     model: string;
     dimensions?: number;
+    baseUrl?: string;
   };
   dbPath: string;
   autoCapture: boolean;
@@ -56,10 +60,14 @@ export interface PluginConfig {
 // ============================================================================
 
 const DEFAULT_MODEL = "voyage-3-large";
+const DEFAULT_PROVIDER: EmbeddingProvider = "voyage";
 export const DEFAULT_CAPTURE_MAX_CHARS = 500;
 
-// Voyage AI embedding model dimensions
+const VALID_PROVIDERS = new Set(["voyage", "openai", "jina"]);
+
+// Embedding model dimensions by provider
 const EMBEDDING_DIMENSIONS: Record<string, number> = {
+  // Voyage AI
   "voyage-3-large": 1024,
   "voyage-3": 1024,
   "voyage-3-lite": 512,
@@ -67,6 +75,13 @@ const EMBEDDING_DIMENSIONS: Record<string, number> = {
   "voyage-finance-2": 1024,
   "voyage-law-2": 1024,
   "voyage-multilingual-2": 1024,
+  // OpenAI
+  "text-embedding-3-small": 1536,
+  "text-embedding-3-large": 3072,
+  "text-embedding-ada-002": 1536,
+  // Jina
+  "jina-embeddings-v3": 1024,
+  "jina-embeddings-v2-base-en": 768,
 };
 
 export function vectorDimsForModel(model: string, overrideDims?: number): number {
@@ -106,6 +121,22 @@ function resolveEnvVars(value: string): string {
 }
 
 // ============================================================================
+// Provider-specific env var fallback
+// ============================================================================
+
+const PROVIDER_ENV_VARS: Record<EmbeddingProvider, string> = {
+  voyage: "VOYAGE_API_KEY",
+  openai: "OPENAI_API_KEY",
+  jina: "JINA_API_KEY",
+};
+
+const PROVIDER_DEFAULT_MODELS: Record<EmbeddingProvider, string> = {
+  voyage: "voyage-3-large",
+  openai: "text-embedding-3-small",
+  jina: "jina-embeddings-v3",
+};
+
+// ============================================================================
 // Config Parser (matches built-in plugin pattern)
 // ============================================================================
 
@@ -121,15 +152,31 @@ export const memoryConfigSchema = {
     if (!embedding) {
       throw new Error("embedding config is required");
     }
-    const apiKey = typeof embedding.apiKey === "string"
-      ? embedding.apiKey
-      : process.env.VOYAGE_API_KEY || "";
-    if (!apiKey) {
-      throw new Error("embedding.apiKey is required (set directly or via VOYAGE_API_KEY env var)");
+
+    // Provider (default: "voyage" for backward compatibility)
+    const provider = (typeof embedding.provider === "string" && VALID_PROVIDERS.has(embedding.provider)
+      ? embedding.provider
+      : DEFAULT_PROVIDER) as EmbeddingProvider;
+
+    if (typeof embedding.provider === "string" && !VALID_PROVIDERS.has(embedding.provider)) {
+      throw new Error(
+        `Unknown embedding provider: ${embedding.provider}. Supported providers: voyage, openai, jina`,
+      );
     }
 
-    const model = typeof embedding.model === "string" ? embedding.model : DEFAULT_MODEL;
+    // API key: try config value, then provider-specific env var, then VOYAGE_API_KEY fallback
+    const envVarName = PROVIDER_ENV_VARS[provider];
+    const apiKey = typeof embedding.apiKey === "string"
+      ? embedding.apiKey
+      : process.env[envVarName] || process.env.VOYAGE_API_KEY || "";
+    if (!apiKey) {
+      throw new Error(`embedding.apiKey is required (set directly or via ${envVarName} env var)`);
+    }
+
+    const defaultModel = PROVIDER_DEFAULT_MODELS[provider];
+    const model = typeof embedding.model === "string" ? embedding.model : defaultModel;
     const overrideDims = typeof embedding.dimensions === "number" ? embedding.dimensions : undefined;
+    const baseUrl = typeof embedding.baseUrl === "string" ? embedding.baseUrl : undefined;
     vectorDimsForModel(model, overrideDims); // validate
 
     // Retrieval config
@@ -153,9 +200,11 @@ export const memoryConfigSchema = {
 
     return {
       embedding: {
+        provider,
         apiKey: resolveEnvVars(apiKey),
         model,
         dimensions: overrideDims,
+        baseUrl,
       },
       dbPath: typeof cfg.dbPath === "string" ? cfg.dbPath : resolveDefaultDbPath(),
       autoCapture: cfg.autoCapture !== false,

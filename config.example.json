@@ -2,9 +2,28 @@
   "_comment": "Vidya — Example plugin config for openclaw.json under plugins.entries.memory-lancedb-voyage.config",
 
   "embedding": {
+    "provider": "voyage",
     "apiKey": "${VOYAGE_API_KEY}",
     "model": "voyage-3-large",
-    "_comment": "Get your API key at https://dash.voyageai.com/. Models: voyage-3-large (1024d), voyage-3 (1024d), voyage-3-lite (512d)"
+    "_comment": "Provider: 'voyage' (default), 'openai', or 'jina'. Get API keys at: https://dash.voyageai.com/ | https://platform.openai.com/ | https://jina.ai/"
+  },
+
+  "_comment_providers": [
+    "Voyage AI  — Models: voyage-3-large (1024d), voyage-3 (1024d), voyage-3-lite (512d), voyage-code-3 (1024d)",
+    "OpenAI     — Models: text-embedding-3-small (1536d), text-embedding-3-large (3072d), text-embedding-ada-002 (1536d)",
+    "Jina AI    — Models: jina-embeddings-v3 (1024d), jina-embeddings-v2-base-en (768d)"
+  ],
+
+  "_comment_openai_example": {
+    "provider": "openai",
+    "apiKey": "${OPENAI_API_KEY}",
+    "model": "text-embedding-3-small"
+  },
+
+  "_comment_jina_example": {
+    "provider": "jina",
+    "apiKey": "${JINA_API_KEY}",
+    "model": "jina-embeddings-v3"
   },
 
   "dbPath": "~/.openclaw/memory/lancedb-voyage",

@@ -12,6 +12,12 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "provider": {
+            "type": "string",
+            "enum": ["voyage", "openai", "jina"],
+            "default": "voyage",
+            "description": "Embedding provider: voyage (Voyage AI), openai (OpenAI), or jina (Jina AI)"
+          },
           "apiKey": {
             "type": "string"
           },
@@ -22,6 +28,10 @@
           "dimensions": {
             "type": "integer",
             "minimum": 1
+          },
+          "baseUrl": {
+            "type": "string",
+            "description": "Custom API endpoint URL override (e.g. for proxies or self-hosted models)"
           },
           "inputType": {
             "type": "string",
@@ -185,21 +195,31 @@
     "required": ["embedding"]
   },
   "uiHints": {
+    "embedding.provider": {
+      "label": "Embedding Provider",
+      "help": "Choose embedding provider: voyage (Voyage AI), openai (OpenAI), or jina (Jina AI). Default: voyage"
+    },
     "embedding.apiKey": {
-      "label": "Voyage AI API Key",
+      "label": "Embedding API Key",
       "sensitive": true,
       "placeholder": "pa-... or ${VOYAGE_API_KEY}",
-      "help": "API key for Voyage AI (used for both embeddings and reranking)"
+      "help": "API key for the embedding provider. Env vars: VOYAGE_API_KEY, OPENAI_API_KEY, or JINA_API_KEY"
     },
     "embedding.model": {
       "label": "Embedding Model",
       "placeholder": "voyage-3-large",
-      "help": "Voyage AI embedding model (voyage-3-large, voyage-3, voyage-3-lite, voyage-code-3)"
+      "help": "Embedding model. Voyage: voyage-3-large, voyage-3, voyage-3-lite. OpenAI: text-embedding-3-small, text-embedding-3-large. Jina: jina-embeddings-v3, jina-embeddings-v2-base-en"
     },
     "embedding.dimensions": {
       "label": "Vector Dimensions",
       "placeholder": "auto-detected from model",
       "help": "Override vector dimensions for custom models not in the built-in lookup table",
+      "advanced": true
+    },
+    "embedding.baseUrl": {
+      "label": "Custom API Endpoint",
+      "placeholder": "https://api.voyageai.com/v1/embeddings",
+      "help": "Override the default API endpoint URL (useful for proxies or self-hosted models)",
       "advanced": true
     },
     "dbPath": {
