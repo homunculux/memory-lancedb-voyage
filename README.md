@@ -27,7 +27,7 @@ A memory plugin for [OpenClaw](https://github.com/openclaw/openclaw) that gives 
 
 ```bash
 cd ~/.openclaw/plugins
-git clone https://github.com/homunculux/Vidya.git memory-lancedb-voyage
+git clone https://github.com/AKASHA-HQ/Vidya.git memory-lancedb-voyage
 cd memory-lancedb-voyage
 npm install
 ```
@@ -282,4 +282,4 @@ Once a database is created with a specific embedding model, changing models requ
 
 ## License
 
-[MIT](LICENSE) © 2026 homunculux
+[MIT](LICENSE) © 2026 AKASHA-HQ
