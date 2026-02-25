@@ -109,12 +109,14 @@ async function callLlmForCaptureJudgment(
   conversationText: string,
   model: string,
   logger: { info: (msg: string) => void; warn: (msg: string) => void; debug?: (msg: string) => void },
+  configuredLlmUrl?: string,
 ): Promise<LlmMemoryJudgment | null> {
-  // Try OpenClaw gateway first (localhost:3000), then fallback to localhost:8080
-  const gatewayUrls = [
-    process.env.OPENCLAW_GATEWAY_URL || "http://localhost:3000",
-    "http://localhost:8080",
-  ];
+  // Try configured URL first, then env var, then default fallbacks
+  const gatewayUrls: string[] = [];
+  if (configuredLlmUrl) gatewayUrls.push(configuredLlmUrl);
+  if (process.env.OPENCLAW_GATEWAY_URL) gatewayUrls.push(process.env.OPENCLAW_GATEWAY_URL);
+  if (!gatewayUrls.some(u => u.includes("localhost:3000"))) gatewayUrls.push("http://localhost:3000");
+  if (!gatewayUrls.some(u => u.includes("localhost:8080"))) gatewayUrls.push("http://localhost:8080");
 
   const requestBody = JSON.stringify({
     model,
@@ -514,6 +516,7 @@ const memoryLanceDBVoyagePlugin = {
               llmInput,
               config.captureLlmModel,
               api.logger,
+              config.captureLlmUrl || undefined,
             );
 
             // Mark as judged regardless of outcome (avoid re-judging same content)

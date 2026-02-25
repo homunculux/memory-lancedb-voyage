@@ -58,6 +58,27 @@
       "captureAssistant": {
         "type": "boolean"
       },
+      "captureMaxChars": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 10000,
+        "default": 500,
+        "description": "Maximum character length for auto-capture candidates"
+      },
+      "captureLlm": {
+        "type": "boolean",
+        "default": true,
+        "description": "Use LLM to judge capture-worthiness. Falls back to heuristic if false or LLM unavailable."
+      },
+      "captureLlmModel": {
+        "type": "string",
+        "default": "anthropic/claude-haiku-4-5-20251001",
+        "description": "Model for LLM capture judgment (routed via gateway)"
+      },
+      "captureLlmUrl": {
+        "type": "string",
+        "description": "Custom LLM endpoint URL for capture judgment. Defaults to OpenClaw gateway (localhost:3000)."
+      },
       "retrieval": {
         "type": "object",
         "additionalProperties": false,

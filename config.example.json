@@ -35,7 +35,8 @@
 
   "captureLlm": true,
   "captureLlmModel": "anthropic/claude-haiku-4-5-20251001",
-  "_comment_llm": "LLM judges whether conversation content is worth storing. Falls back to heuristic if LLM unavailable. Calls OpenClaw gateway at localhost:3000.",
+  "captureLlmUrl": "",
+  "_comment_llm": "LLM judges whether conversation content is worth storing. Falls back to heuristic if LLM unavailable. captureLlmUrl overrides the default OpenClaw gateway (localhost:3000). Any OpenAI-compatible /v1/chat/completions endpoint works.",
 
   "enableManagementTools": false,
   "_comment_tools": "Set true to enable memory_list and memory_stats tools (useful for debugging)",
