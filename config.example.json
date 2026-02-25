@@ -1,0 +1,58 @@
+{
+  "_comment": "Vidya — Example plugin config for openclaw.json under plugins.entries.memory-lancedb-voyage.config",
+
+  "embedding": {
+    "apiKey": "${VOYAGE_API_KEY}",
+    "model": "voyage-3-large",
+    "_comment": "Get your API key at https://dash.voyageai.com/. Models: voyage-3-large (1024d), voyage-3 (1024d), voyage-3-lite (512d)"
+  },
+
+  "dbPath": "~/.openclaw/memory/lancedb-voyage",
+
+  "autoCapture": true,
+  "autoRecall": true,
+  "captureAssistant": false,
+  "captureMaxChars": 500,
+
+  "captureLlm": true,
+  "captureLlmModel": "anthropic/claude-haiku-4-5-20251001",
+  "_comment_llm": "LLM judges whether conversation content is worth storing. Falls back to heuristic if LLM unavailable. Calls OpenClaw gateway at localhost:3000.",
+
+  "enableManagementTools": false,
+  "_comment_tools": "Set true to enable memory_list and memory_stats tools (useful for debugging)",
+
+  "retrieval": {
+    "mode": "hybrid",
+    "vectorWeight": 0.7,
+    "bm25Weight": 0.3,
+    "minScore": 0.3,
+    "rerank": "cross-encoder",
+    "rerankModel": "rerank-2",
+    "candidatePoolSize": 20,
+    "filterNoise": true,
+    "hardMinScore": 0.35,
+    "lengthNormAnchor": 500,
+    "recencyHalfLifeDays": 14,
+    "recencyWeight": 0.10,
+    "timeDecayHalfLifeDays": 60,
+    "_comment": "cross-encoder uses Voyage rerank-2 API (same API key). Set rerank to 'none' to skip reranking."
+  },
+
+  "sessionMemory": {
+    "enabled": false,
+    "messageCount": 15,
+    "_comment": "Stores session summaries on /new command"
+  },
+
+  "scopes": {
+    "default": "global",
+    "definitions": {
+      "global": { "description": "Shared knowledge across all agents" },
+      "project:myapp": { "description": "Memories specific to myapp project" }
+    },
+    "agentAccess": {
+      "dev-agent": ["global", "project:myapp"],
+      "_comment": "Restrict which scopes each agent can read/write. Omit agent to grant access to all defined scopes."
+    }
+  }
+}
