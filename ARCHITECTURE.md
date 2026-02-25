@@ -1,4 +1,4 @@
-# Architecture: memory-lancedb-voyage
+# Architecture: Vidya
 
 OpenClaw memory plugin using LanceDB for storage and Voyage AI for embeddings + reranking.
 

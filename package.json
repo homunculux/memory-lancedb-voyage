@@ -1,10 +1,27 @@
 {
-  "name": "@openclaw/memory-lancedb-voyage",
+  "name": "vidya",
   "version": "2026.2.25",
-  "private": true,
-  "description": "OpenClaw memory plugin with hybrid retrieval (vector + BM25), Voyage AI embedding & reranking",
+  "description": "Vidya — Hybrid memory plugin for OpenClaw agents. LanceDB vector store + Voyage AI embedding/rerank + BM25 keyword search.",
   "type": "module",
   "main": "index.ts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/homunculux/Vidya.git"
+  },
+  "keywords": [
+    "openclaw",
+    "memory",
+    "lancedb",
+    "voyage-ai",
+    "hybrid-search",
+    "embeddings",
+    "reranking",
+    "ai-agent"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@lancedb/lancedb": "^0.26.2",
     "@sinclair/typebox": "0.34.48"
