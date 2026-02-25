@@ -624,3 +624,163 @@ describe("shouldSkipRetrieval()", () => {
     assert.equal(shouldSkipRetrieval("about a week ago we talked"), false);
   });
 });
+
+// ============================================================================
+// 6. Embedding Provider Abstraction
+// ============================================================================
+
+import { createEmbedderFromConfig } from "../src/embedder-factory.js";
+import { VoyageEmbedder } from "../src/embedder.js";
+import { OpenAIEmbedder } from "../src/embedder-openai.js";
+import { JinaEmbedder } from "../src/embedder-jina.js";
+
+describe("Embedding Provider Abstraction", () => {
+  describe("createEmbedderFromConfig()", () => {
+    it("creates VoyageEmbedder for provider=voyage", () => {
+      const embedder = createEmbedderFromConfig({
+        provider: "voyage",
+        apiKey: "test-key",
+        model: "voyage-3-large",
+      });
+      assert.ok(embedder instanceof VoyageEmbedder);
+      assert.equal(embedder.dimensions, 1024);
+      assert.equal(embedder.model, "voyage-3-large");
+    });
+
+    it("creates OpenAIEmbedder for provider=openai", () => {
+      const embedder = createEmbedderFromConfig({
+        provider: "openai",
+        apiKey: "test-key",
+        model: "text-embedding-3-small",
+      });
+      assert.ok(embedder instanceof OpenAIEmbedder);
+      assert.equal(embedder.dimensions, 1536);
+      assert.equal(embedder.model, "text-embedding-3-small");
+    });
+
+    it("creates JinaEmbedder for provider=jina", () => {
+      const embedder = createEmbedderFromConfig({
+        provider: "jina",
+        apiKey: "test-key",
+        model: "jina-embeddings-v3",
+      });
+      assert.ok(embedder instanceof JinaEmbedder);
+      assert.equal(embedder.dimensions, 1024);
+      assert.equal(embedder.model, "jina-embeddings-v3");
+    });
+
+    it("throws for unknown provider", () => {
+      assert.throws(
+        () => createEmbedderFromConfig({
+          provider: "unknown" as any,
+          apiKey: "test-key",
+          model: "some-model",
+        }),
+        /Unknown embedding provider/,
+      );
+    });
+
+    it("respects custom dimensions override", () => {
+      const embedder = createEmbedderFromConfig({
+        provider: "openai",
+        apiKey: "test-key",
+        model: "text-embedding-3-large",
+        dimensions: 256,
+      });
+      assert.equal(embedder.dimensions, 256);
+    });
+  });
+
+  describe("Config parser provider support", () => {
+    it("defaults provider to voyage when not specified", () => {
+      const config = memoryConfigSchema.parse({
+        embedding: { apiKey: "test-key" },
+      });
+      assert.equal(config.embedding.provider, "voyage");
+      assert.equal(config.embedding.model, "voyage-3-large");
+    });
+
+    it("accepts openai provider", () => {
+      const config = memoryConfigSchema.parse({
+        embedding: { provider: "openai", apiKey: "test-key" },
+      });
+      assert.equal(config.embedding.provider, "openai");
+      assert.equal(config.embedding.model, "text-embedding-3-small");
+    });
+
+    it("accepts jina provider", () => {
+      const config = memoryConfigSchema.parse({
+        embedding: { provider: "jina", apiKey: "test-key" },
+      });
+      assert.equal(config.embedding.provider, "jina");
+      assert.equal(config.embedding.model, "jina-embeddings-v3");
+    });
+
+    it("throws for unknown provider", () => {
+      assert.throws(
+        () => memoryConfigSchema.parse({
+          embedding: { provider: "unknown", apiKey: "test-key" },
+        }),
+        /Unknown embedding provider/,
+      );
+    });
+
+    it("resolves provider-specific env vars", () => {
+      process.env.OPENAI_API_KEY = "sk-test-from-env";
+      try {
+        const config = memoryConfigSchema.parse({
+          embedding: { provider: "openai" },
+        });
+        assert.equal(config.embedding.apiKey, "sk-test-from-env");
+      } finally {
+        delete process.env.OPENAI_API_KEY;
+      }
+    });
+
+    it("accepts baseUrl for custom endpoints", () => {
+      const config = memoryConfigSchema.parse({
+        embedding: { provider: "openai", apiKey: "test-key", baseUrl: "http://localhost:8080/v1" },
+      });
+      assert.equal(config.embedding.baseUrl, "http://localhost:8080/v1");
+    });
+  });
+
+  describe("Dimension lookups per provider", () => {
+    it("Voyage: voyage-3-large → 1024", () => {
+      const e = createEmbedderFromConfig({ provider: "voyage", apiKey: "k", model: "voyage-3-large" });
+      assert.equal(e.dimensions, 1024);
+    });
+
+    it("Voyage: voyage-3-lite → 512", () => {
+      const e = createEmbedderFromConfig({ provider: "voyage", apiKey: "k", model: "voyage-3-lite" });
+      assert.equal(e.dimensions, 512);
+    });
+
+    it("OpenAI: text-embedding-3-large → 3072", () => {
+      const e = createEmbedderFromConfig({ provider: "openai", apiKey: "k", model: "text-embedding-3-large" });
+      assert.equal(e.dimensions, 3072);
+    });
+
+    it("OpenAI: text-embedding-ada-002 → 1536", () => {
+      const e = createEmbedderFromConfig({ provider: "openai", apiKey: "k", model: "text-embedding-ada-002" });
+      assert.equal(e.dimensions, 1536);
+    });
+
+    it("Jina: jina-embeddings-v2-base-en → 768", () => {
+      const e = createEmbedderFromConfig({ provider: "jina", apiKey: "k", model: "jina-embeddings-v2-base-en" });
+      assert.equal(e.dimensions, 768);
+    });
+
+    it("unknown model without dimensions → throws", () => {
+      assert.throws(
+        () => createEmbedderFromConfig({ provider: "openai", apiKey: "k", model: "unknown-model" }),
+        /Unknown embedding model/,
+      );
+    });
+
+    it("unknown model with dimensions override → works", () => {
+      const e = createEmbedderFromConfig({ provider: "openai", apiKey: "k", model: "custom-model", dimensions: 384 });
+      assert.equal(e.dimensions, 384);
+    });
+  });
+});

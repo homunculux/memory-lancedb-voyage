@@ -9,7 +9,8 @@ A memory plugin for [OpenClaw](https://github.com/openclaw/openclaw) that gives 
 ## Features
 
 - **Hybrid Search** — Vector similarity + BM25 keyword search fused via Reciprocal Rank Fusion (RRF)
-- **Voyage AI Integration** — Embeddings (`voyage-3-large`) and cross-encoder reranking (`rerank-2`) from a single API key
+- **Multi-Provider Embeddings** — Voyage AI, OpenAI, or Jina AI embeddings with a single config switch
+- **Voyage AI Reranking** — Cross-encoder reranking (`rerank-2`) for high-quality retrieval
 - **Multi-Scope Isolation** — Separate memory spaces per agent, project, or user with access control
 - **Auto-Capture** — Automatically stores important information from conversations using LLM judgment (with heuristic fallback)
 - **Auto-Recall** — Injects relevant memories into agent context before each turn
@@ -65,10 +66,15 @@ Add to your `openclaw.json`:
 ### 3. Set API Key
 
 ```bash
+# Voyage AI (default)
 export VOYAGE_API_KEY="pa-..."
+
+# Or for OpenAI / Jina:
+# export OPENAI_API_KEY="sk-..."
+# export JINA_API_KEY="jina_..."
 ```
 
-Get your key at [dash.voyageai.com](https://dash.voyageai.com/).
+Get your key at [dash.voyageai.com](https://dash.voyageai.com/), [platform.openai.com](https://platform.openai.com/), or [jina.ai](https://jina.ai/).
 
 ### 4. Restart OpenClaw
 
@@ -82,12 +88,66 @@ See [`config.example.json`](config.example.json) for all available options.
 
 | Section | Key Options | Description |
 |---------|-------------|-------------|
-| `embedding` | `apiKey`, `model`, `dimensions` | Voyage AI embedding model. Supports `voyage-3-large` (1024d), `voyage-3`, `voyage-3-lite` (512d), `voyage-code-3` |
+| `embedding` | `provider`, `apiKey`, `model`, `dimensions`, `baseUrl` | Embedding provider and model. See [Embedding Providers](#embedding-providers) below |
 | `retrieval` | `mode`, `rerank`, `minScore`, `hardMinScore` | `hybrid` (vector+BM25) or `vector` only. Rerank: `cross-encoder`, `lightweight`, or `none` |
 | `autoCapture` | `captureLlm`, `captureLlmModel` | LLM judges capture-worthiness via OpenClaw gateway. Falls back to regex heuristic if LLM unavailable |
 | `scopes` | `default`, `definitions`, `agentAccess` | Memory isolation. Define scopes and restrict agent access |
 | `sessionMemory` | `enabled`, `messageCount` | Store session summaries on `/new` command |
 | `enableManagementTools` | — | Enables `memory_stats` and `memory_list` tools |
+
+## Embedding Providers
+
+Vidya supports three embedding providers. Set `embedding.provider` in your config:
+
+### Voyage AI (default)
+
+```json
+{
+  "embedding": {
+    "provider": "voyage",
+    "apiKey": "${VOYAGE_API_KEY}",
+    "model": "voyage-3-large"
+  }
+}
+```
+
+Models: `voyage-3-large` (1024d), `voyage-3` (1024d), `voyage-3-lite` (512d), `voyage-code-3` (1024d)
+
+Voyage supports task-aware embeddings (`query` vs `document` input types) and cross-encoder reranking via the same API key.
+
+### OpenAI
+
+```json
+{
+  "embedding": {
+    "provider": "openai",
+    "apiKey": "${OPENAI_API_KEY}",
+    "model": "text-embedding-3-small"
+  }
+}
+```
+
+Models: `text-embedding-3-small` (1536d), `text-embedding-3-large` (3072d), `text-embedding-ada-002` (1536d)
+
+Supports `dimensions` parameter for truncated embeddings (e.g., `"dimensions": 256`). Use `baseUrl` for Azure OpenAI or compatible endpoints.
+
+### Jina
+
+```json
+{
+  "embedding": {
+    "provider": "jina",
+    "apiKey": "${JINA_API_KEY}",
+    "model": "jina-embeddings-v3"
+  }
+}
+```
+
+Models: `jina-embeddings-v3` (1024d), `jina-embeddings-v2-base-en` (768d)
+
+Jina v3 supports task-aware embeddings (`retrieval.query` / `retrieval.passage`).
+
+> **Note:** Reranking always uses Voyage AI regardless of embedding provider. If you use OpenAI or Jina for embeddings, set `retrieval.rerank` to `"lightweight"` or `"none"` unless you also have a Voyage API key configured.
 
 ## Retrieval Pipeline
 

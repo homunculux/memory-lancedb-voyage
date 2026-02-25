@@ -1,146 +1,81 @@
 /**
- * Voyage AI Embedding Layer
- * Uses native fetch — no OpenAI SDK dependency.
+ * Jina AI Embedding Provider
+ * Supports jina-embeddings-v3, jina-embeddings-v2-base-en.
+ * Uses native fetch — no SDK dependency.
  */
 
-import { createHash } from "node:crypto";
 import { vectorDimsForModel } from "./config.js";
+import { EmbeddingCache } from "./embedder.js";
 import type { IEmbedder } from "./embedder-interface.js";
-
-// ============================================================================
-// Embedding Cache (LRU with TTL)
-// ============================================================================
-
-interface CacheEntry {
-  vector: number[];
-  createdAt: number;
-}
-
-export class EmbeddingCache {
-  private cache = new Map<string, CacheEntry>();
-  private readonly maxSize: number;
-  private readonly ttlMs: number;
-  public hits = 0;
-  public misses = 0;
-
-  constructor(maxSize = 256, ttlMinutes = 30) {
-    this.maxSize = maxSize;
-    this.ttlMs = ttlMinutes * 60_000;
-  }
-
-  key(text: string, inputType?: string): string {
-    return createHash("sha256").update(`${inputType || ""}:${text}`).digest("hex").slice(0, 24);
-  }
-
-  get(text: string, inputType?: string): number[] | undefined {
-    const k = this.key(text, inputType);
-    const entry = this.cache.get(k);
-    if (!entry) {
-      this.misses++;
-      return undefined;
-    }
-    if (Date.now() - entry.createdAt > this.ttlMs) {
-      this.cache.delete(k);
-      this.misses++;
-      return undefined;
-    }
-    // Move to end (most recently used)
-    this.cache.delete(k);
-    this.cache.set(k, entry);
-    this.hits++;
-    return entry.vector;
-  }
-
-  set(text: string, inputType: string | undefined, vector: number[]): void {
-    const k = this.key(text, inputType);
-    if (this.cache.size >= this.maxSize) {
-      const firstKey = this.cache.keys().next().value;
-      if (firstKey !== undefined) this.cache.delete(firstKey);
-    }
-    this.cache.set(k, { vector, createdAt: Date.now() });
-  }
-
-  get size(): number { return this.cache.size; }
-  get stats(): { size: number; hits: number; misses: number; hitRate: string } {
-    const total = this.hits + this.misses;
-    return {
-      size: this.cache.size,
-      hits: this.hits,
-      misses: this.misses,
-      hitRate: total > 0 ? `${((this.hits / total) * 100).toFixed(1)}%` : "N/A",
-    };
-  }
-}
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export interface EmbeddingConfig {
+export interface JinaEmbeddingConfig {
   apiKey: string;
   model: string;
   dimensions?: number;
   baseUrl?: string;
 }
 
-interface VoyageEmbeddingResponse {
+interface JinaEmbeddingResponse {
+  model: string;
   object: string;
   data: Array<{ object: string; embedding: number[]; index: number }>;
-  model: string;
-  usage: { total_tokens: number };
+  usage: { total_tokens: number; prompt_tokens: number };
 }
 
 // ============================================================================
-// VoyageEmbedder Class
+// JinaEmbedder Class
 // ============================================================================
 
-const DEFAULT_VOYAGE_URL = "https://api.voyageai.com/v1/embeddings";
+const DEFAULT_JINA_URL = "https://api.jina.ai/v1/embeddings";
 
-export class VoyageEmbedder implements IEmbedder {
+export class JinaEmbedder implements IEmbedder {
   public readonly dimensions: number;
   private readonly _cache: EmbeddingCache;
   private readonly _apiKey: string;
   private readonly _model: string;
   private readonly _baseUrl: string;
+  private readonly _supportsTaskParam: boolean;
 
-  constructor(config: EmbeddingConfig) {
+  constructor(config: JinaEmbeddingConfig) {
     this._apiKey = config.apiKey;
     this._model = config.model;
     this.dimensions = vectorDimsForModel(config.model, config.dimensions);
     this._cache = new EmbeddingCache(256, 30);
-    this._baseUrl = config.baseUrl || DEFAULT_VOYAGE_URL;
+    this._baseUrl = config.baseUrl || DEFAULT_JINA_URL;
+    // jina-embeddings-v3 supports the task parameter
+    this._supportsTaskParam = config.model.includes("v3");
   }
 
   // --------------------------------------------------------------------------
-  // Backward-compatible API
+  // IEmbedder API
   // --------------------------------------------------------------------------
 
   async embed(text: string): Promise<number[]> {
     return this.embedPassage(text);
   }
 
+  async embedQuery(text: string): Promise<number[]> {
+    return this.embedSingle(text, "retrieval.query");
+  }
+
+  async embedPassage(text: string): Promise<number[]> {
+    return this.embedSingle(text, "retrieval.passage");
+  }
+
   async embedBatch(texts: string[]): Promise<number[][]> {
     return this.embedBatchPassage(texts);
   }
 
-  // --------------------------------------------------------------------------
-  // Task-aware API (Voyage uses input_type: "query" | "document")
-  // --------------------------------------------------------------------------
-
-  async embedQuery(text: string): Promise<number[]> {
-    return this.embedSingle(text, "query");
-  }
-
-  async embedPassage(text: string): Promise<number[]> {
-    return this.embedSingle(text, "document");
-  }
-
   async embedBatchQuery(texts: string[]): Promise<number[][]> {
-    return this.embedMany(texts, "query");
+    return this.embedMany(texts, "retrieval.query");
   }
 
   async embedBatchPassage(texts: string[]): Promise<number[][]> {
-    return this.embedMany(texts, "document");
+    return this.embedMany(texts, "retrieval.passage");
   }
 
   // --------------------------------------------------------------------------
@@ -158,32 +93,35 @@ export class VoyageEmbedder implements IEmbedder {
     }
   }
 
-  private async embedSingle(text: string, inputType: "query" | "document"): Promise<number[]> {
+  private async embedSingle(text: string, task: string): Promise<number[]> {
     if (!text || text.trim().length === 0) {
       throw new Error("Cannot embed empty text");
     }
 
-    const cached = this._cache.get(text, inputType);
+    const cached = this._cache.get(text, task);
     if (cached) return cached;
 
     const body: Record<string, unknown> = {
       model: this._model,
       input: [text],
-      input_type: inputType,
     };
 
-    const response = await this.callVoyageAPI(body);
+    if (this._supportsTaskParam) {
+      body.task = task;
+    }
+
+    const response = await this.callJinaAPI(body);
     const embedding = response.data[0]?.embedding;
     if (!embedding) {
-      throw new Error("No embedding returned from Voyage AI");
+      throw new Error("No embedding returned from Jina AI");
     }
 
     this.validateEmbedding(embedding);
-    this._cache.set(text, inputType, embedding);
+    this._cache.set(text, task, embedding);
     return embedding;
   }
 
-  private async embedMany(texts: string[], inputType: "query" | "document"): Promise<number[][]> {
+  private async embedMany(texts: string[], task: string): Promise<number[][]> {
     if (!texts || texts.length === 0) return [];
 
     const validTexts: string[] = [];
@@ -198,7 +136,7 @@ export class VoyageEmbedder implements IEmbedder {
 
     if (validTexts.length === 0) return texts.map(() => []);
 
-    // Voyage AI supports up to 128 texts per batch; chunk if needed
+    // Jina supports up to 2048 texts per batch; chunk at 128 for consistency
     const BATCH_SIZE = 128;
     const results: number[][] = new Array(texts.length);
 
@@ -209,10 +147,13 @@ export class VoyageEmbedder implements IEmbedder {
       const body: Record<string, unknown> = {
         model: this._model,
         input: batchTexts,
-        input_type: inputType,
       };
 
-      const response = await this.callVoyageAPI(body);
+      if (this._supportsTaskParam) {
+        body.task = task;
+      }
+
+      const response = await this.callJinaAPI(body);
 
       response.data.forEach((item, idx) => {
         const originalIndex = batchIndices[idx];
@@ -230,7 +171,7 @@ export class VoyageEmbedder implements IEmbedder {
     return results;
   }
 
-  private async callVoyageAPI(body: Record<string, unknown>): Promise<VoyageEmbeddingResponse> {
+  private async callJinaAPI(body: Record<string, unknown>): Promise<JinaEmbeddingResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30_000);
 
@@ -247,10 +188,10 @@ export class VoyageEmbedder implements IEmbedder {
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => "");
-        throw new Error(`Voyage AI embedding API returned ${response.status}: ${errorText}`);
+        throw new Error(`Jina AI embedding API returned ${response.status}: ${errorText}`);
       }
 
-      return await response.json() as VoyageEmbeddingResponse;
+      return await response.json() as JinaEmbeddingResponse;
     } finally {
       clearTimeout(timeout);
     }
@@ -276,20 +217,3 @@ export class VoyageEmbedder implements IEmbedder {
     return this._cache.stats;
   }
 }
-
-// ============================================================================
-// Backward-Compatible Aliases
-// ============================================================================
-
-/** @deprecated Use VoyageEmbedder directly */
-export const Embedder = VoyageEmbedder;
-
-// ============================================================================
-// Factory (backward-compatible)
-// ============================================================================
-
-export function createEmbedder(config: EmbeddingConfig): VoyageEmbedder {
-  return new VoyageEmbedder(config);
-}
-
-export { vectorDimsForModel as getVectorDimensions };
