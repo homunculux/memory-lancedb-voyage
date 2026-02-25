@@ -90,7 +90,7 @@ See [`config.example.json`](config.example.json) for all available options.
 |---------|-------------|-------------|
 | `embedding` | `provider`, `apiKey`, `model`, `dimensions`, `baseUrl` | Embedding provider and model. See [Embedding Providers](#embedding-providers) below |
 | `retrieval` | `mode`, `rerank`, `minScore`, `hardMinScore` | `hybrid` (vector+BM25) or `vector` only. Rerank: `cross-encoder`, `lightweight`, or `none` |
-| `autoCapture` | `captureLlm`, `captureLlmModel` | LLM judges capture-worthiness via OpenClaw gateway. Falls back to regex heuristic if LLM unavailable |
+| `autoCapture` | `captureLlm`, `captureLlmModel`, `captureLlmUrl` | LLM judges capture-worthiness. Set `captureLlmUrl` for custom endpoint. Falls back to heuristic if LLM unavailable |
 | `scopes` | `default`, `definitions`, `agentAccess` | Memory isolation. Define scopes and restrict agent access |
 | `sessionMemory` | `enabled`, `messageCount` | Store session summaries on `/new` command |
 | `enableManagementTools` | — | Enables `memory_stats` and `memory_list` tools |
@@ -148,6 +148,28 @@ Models: `jina-embeddings-v3` (1024d), `jina-embeddings-v2-base-en` (768d)
 Jina v3 supports task-aware embeddings (`retrieval.query` / `retrieval.passage`).
 
 > **Note:** Reranking always uses Voyage AI regardless of embedding provider. If you use OpenAI or Jina for embeddings, set `retrieval.rerank` to `"lightweight"` or `"none"` unless you also have a Voyage API key configured.
+
+## Auto-Capture (LLM Judgment)
+
+Vidya can automatically capture important information from conversations. When `captureLlm` is enabled (default), an LLM evaluates each conversation turn to decide what's worth remembering.
+
+**How it works:**
+1. Heuristic pre-filter checks for trigger patterns (preferences, decisions, entities, etc.)
+2. LLM receives the conversation context and judges capture-worthiness
+3. If the LLM says store, it returns refined memory text with category and importance
+4. If LLM is unavailable, falls back to the heuristic capture
+
+**LLM endpoint:** By default, Vidya calls the OpenClaw gateway (`localhost:3000/v1/chat/completions`). Set `captureLlmUrl` to use any OpenAI-compatible endpoint:
+
+```json
+{
+  "captureLlm": true,
+  "captureLlmModel": "anthropic/claude-haiku-4-5-20251001",
+  "captureLlmUrl": "https://api.openai.com/v1"
+}
+```
+
+Set `captureLlm: false` to use heuristic-only capture (no LLM calls, lower quality but zero cost).
 
 ## Retrieval Pipeline
 

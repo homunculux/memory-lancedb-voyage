@@ -784,3 +784,39 @@ describe("Embedding Provider Abstraction", () => {
     });
   });
 });
+
+// ============================================================================
+// 7. LLM Capture Config
+// ============================================================================
+
+describe("LLM Capture Config", () => {
+  it("captureLlm defaults to true", () => {
+    const config = memoryConfigSchema.parse({ embedding: { apiKey: "k" } });
+    assert.equal(config.captureLlm, true);
+  });
+
+  it("captureLlm can be disabled", () => {
+    const config = memoryConfigSchema.parse({ embedding: { apiKey: "k" }, captureLlm: false });
+    assert.equal(config.captureLlm, false);
+  });
+
+  it("captureLlmModel has default", () => {
+    const config = memoryConfigSchema.parse({ embedding: { apiKey: "k" } });
+    assert.equal(config.captureLlmModel, "anthropic/claude-haiku-4-5-20251001");
+  });
+
+  it("captureLlmModel can be overridden", () => {
+    const config = memoryConfigSchema.parse({ embedding: { apiKey: "k" }, captureLlmModel: "openai/gpt-4o-mini" });
+    assert.equal(config.captureLlmModel, "openai/gpt-4o-mini");
+  });
+
+  it("captureLlmUrl defaults to empty string", () => {
+    const config = memoryConfigSchema.parse({ embedding: { apiKey: "k" } });
+    assert.equal(config.captureLlmUrl, "");
+  });
+
+  it("captureLlmUrl can be set", () => {
+    const config = memoryConfigSchema.parse({ embedding: { apiKey: "k" }, captureLlmUrl: "http://my-llm:8080/v1" });
+    assert.equal(config.captureLlmUrl, "http://my-llm:8080/v1");
+  });
+});
