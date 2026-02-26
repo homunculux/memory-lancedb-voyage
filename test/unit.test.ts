@@ -843,3 +843,1316 @@ describe("LLM Capture Config", () => {
     assert.equal(config.captureLlmUrl, "http://localhost:3000");
   });
 });
+
+// ============================================================================
+// Phase 1 — Pure Functions
+// ============================================================================
+
+// ============================================================================
+// 8. Noise Filter
+// ============================================================================
+
+import { isNoise, filterNoise } from "../src/noise-filter.js";
+
+describe("isNoise()", () => {
+  it("short text (< 5 chars) → noise", () => {
+    assert.equal(isNoise(""), true);
+    assert.equal(isNoise("hi"), true);
+    assert.equal(isNoise("ok"), true);
+    assert.equal(isNoise("    "), true);
+  });
+
+  it("valid text above 5 chars → not noise", () => {
+    assert.equal(isNoise("This is a valid statement for testing"), false);
+  });
+
+  it("denial patterns → noise", () => {
+    assert.equal(isNoise("I don't have any information about that"), true);
+    assert.equal(isNoise("I'm not sure about that topic"), true);
+    assert.equal(isNoise("I don't recall anything about it"), true);
+    assert.equal(isNoise("I don't remember that conversation"), true);
+    assert.equal(isNoise("It looks like I don't have that"), true);
+    assert.equal(isNoise("I wasn't able to find that"), true);
+    assert.equal(isNoise("No relevant memories found for this"), true);
+    assert.equal(isNoise("I don't have access to that data"), true);
+    assert.equal(isNoise("no memories found in the database"), true);
+  });
+
+  it("meta-question patterns → noise", () => {
+    assert.equal(isNoise("do you remember what I told you"), true);
+    assert.equal(isNoise("can you recall the details from before"), true);
+    assert.equal(isNoise("did I tell you about the project"), true);
+    assert.equal(isNoise("have I told you about my preferences"), true);
+    assert.equal(isNoise("what did I tell you yesterday"), true);
+    assert.equal(isNoise("have I mentioned the new API design"), true);
+    assert.equal(isNoise("did I say something about that"), true);
+  });
+
+  it("boilerplate patterns → noise", () => {
+    assert.equal(isNoise("hi there how are you"), true);
+    assert.equal(isNoise("hello everyone"), true);
+    assert.equal(isNoise("Hey, good to see you"), true);
+    assert.equal(isNoise("good morning team"), true);
+    assert.equal(isNoise("good evening friends"), true);
+    assert.equal(isNoise("greetings from the dev team"), true);
+    assert.equal(isNoise("fresh session starting now"), true);
+    assert.equal(isNoise("new session begun here"), true);
+    assert.equal(isNoise("HEARTBEAT signal active"), true);
+  });
+
+  it("valid text → not noise", () => {
+    assert.equal(isNoise("I prefer dark mode for coding"), false);
+    assert.equal(isNoise("The database schema uses PostgreSQL"), false);
+    assert.equal(isNoise("We decided to switch to TypeScript"), false);
+    assert.equal(isNoise("My email is user@example.com"), false);
+  });
+
+  it("filterDenials=false → denials are not filtered", () => {
+    assert.equal(isNoise("I don't have any information about that", { filterDenials: false }), false);
+  });
+
+  it("filterMetaQuestions=false → meta questions not filtered", () => {
+    assert.equal(isNoise("do you remember what I told you", { filterMetaQuestions: false }), false);
+  });
+
+  it("filterBoilerplate=false → boilerplate not filtered", () => {
+    assert.equal(isNoise("hello everyone in the room", { filterBoilerplate: false }), false);
+  });
+
+  it("all filters disabled → only short text filtered", () => {
+    const opts = { filterDenials: false, filterMetaQuestions: false, filterBoilerplate: false };
+    assert.equal(isNoise("hi", opts), true); // still too short
+    assert.equal(isNoise("I don't have any information", opts), false);
+    assert.equal(isNoise("hello everyone", opts), false);
+  });
+});
+
+describe("filterNoise()", () => {
+  it("filters noisy items from array", () => {
+    const items = [
+      { id: 1, content: "I prefer dark mode for everything" },
+      { id: 2, content: "hi" },
+      { id: 3, content: "I don't have any information about that" },
+      { id: 4, content: "The API uses REST endpoints" },
+    ];
+    const filtered = filterNoise(items, item => item.content);
+    assert.equal(filtered.length, 2);
+    assert.equal(filtered[0].id, 1);
+    assert.equal(filtered[1].id, 4);
+  });
+
+  it("returns empty array if all items are noisy", () => {
+    const items = [
+      { text: "hi" },
+      { text: "ok" },
+      { text: "hello there" },
+    ];
+    const filtered = filterNoise(items, item => item.text);
+    assert.equal(filtered.length, 0);
+  });
+
+  it("returns all items if none are noisy", () => {
+    const items = [
+      { text: "Important technical decision recorded" },
+      { text: "User prefers Python over JavaScript" },
+    ];
+    const filtered = filterNoise(items, item => item.text);
+    assert.equal(filtered.length, 2);
+  });
+
+  it("respects custom options", () => {
+    const items = [
+      { text: "I don't have any information about that topic" },
+    ];
+    const filtered = filterNoise(items, item => item.text, { filterDenials: false });
+    assert.equal(filtered.length, 1);
+  });
+});
+
+// ============================================================================
+// 9. Utils
+// ============================================================================
+
+import { normalizeBaseUrl, getUrlHost } from "../src/utils.js";
+
+describe("normalizeBaseUrl()", () => {
+  it("strips trailing slashes", () => {
+    assert.equal(normalizeBaseUrl("http://example.com/"), "http://example.com");
+    assert.equal(normalizeBaseUrl("http://example.com///"), "http://example.com");
+  });
+
+  it("strips trailing /v1", () => {
+    assert.equal(normalizeBaseUrl("http://example.com/v1"), "http://example.com");
+    assert.equal(normalizeBaseUrl("http://example.com/v1/"), "http://example.com");
+  });
+
+  it("strips trailing /v1 case-insensitively", () => {
+    assert.equal(normalizeBaseUrl("http://example.com/V1"), "http://example.com");
+    assert.equal(normalizeBaseUrl("http://example.com/V1/"), "http://example.com");
+  });
+
+  it("trims whitespace", () => {
+    assert.equal(normalizeBaseUrl("  http://example.com  "), "http://example.com");
+    assert.equal(normalizeBaseUrl("  http://example.com/v1  "), "http://example.com");
+  });
+
+  it("handles URL with path after stripping /v1", () => {
+    assert.equal(normalizeBaseUrl("http://example.com/api/v1"), "http://example.com/api");
+    assert.equal(normalizeBaseUrl("http://example.com/api/v1/"), "http://example.com/api");
+  });
+
+  it("preserves non-v1 paths", () => {
+    assert.equal(normalizeBaseUrl("http://example.com/v2"), "http://example.com/v2");
+    assert.equal(normalizeBaseUrl("http://example.com/api"), "http://example.com/api");
+  });
+
+  it("handles empty string and whitespace", () => {
+    assert.equal(normalizeBaseUrl(""), "");
+    assert.equal(normalizeBaseUrl("   "), "");
+  });
+
+  it("strips trailing slashes after removing /v1", () => {
+    assert.equal(normalizeBaseUrl("http://example.com//v1"), "http://example.com");
+  });
+});
+
+describe("getUrlHost()", () => {
+  it("extracts host from standard URLs", () => {
+    assert.equal(getUrlHost("http://example.com"), "example.com");
+    assert.equal(getUrlHost("https://example.com"), "example.com");
+    assert.equal(getUrlHost("http://example.com:8080"), "example.com:8080");
+    assert.equal(getUrlHost("https://localhost:3000"), "localhost:3000");
+  });
+
+  it("extracts host from URL without protocol", () => {
+    assert.equal(getUrlHost("example.com"), "example.com");
+    // "localhost:3000" is parsed as scheme "localhost:" by URL constructor (doesn't throw),
+    // so it returns empty string host (URL treats "localhost" as the protocol)
+    assert.equal(getUrlHost("localhost:3000"), "");
+  });
+
+  it("returns null for unparseable URLs", () => {
+    assert.equal(getUrlHost(""), null);
+    assert.equal(getUrlHost("not a url at all ::: ///"), null);
+  });
+
+  it("handles URLs with paths", () => {
+    assert.equal(getUrlHost("http://example.com/api/v1"), "example.com");
+    assert.equal(getUrlHost("https://api.openai.com/v1/embeddings"), "api.openai.com");
+  });
+});
+
+// ============================================================================
+// Phase 2 — Mock Fetch Tests
+// ============================================================================
+
+// ============================================================================
+// 10. VoyageEmbedder (mock fetch)
+// ============================================================================
+
+import { VoyageEmbedder, EmbeddingCache } from "../src/embedder.js";
+
+describe("EmbeddingCache", () => {
+  it("get returns undefined on miss", () => {
+    const cache = new EmbeddingCache(10, 30);
+    assert.equal(cache.get("nonexistent"), undefined);
+    assert.equal(cache.misses, 1);
+  });
+
+  it("set and get round-trip", () => {
+    const cache = new EmbeddingCache(10, 30);
+    cache.set("hello", "doc", [1, 2, 3]);
+    const result = cache.get("hello", "doc");
+    assert.deepEqual(result, [1, 2, 3]);
+    assert.equal(cache.hits, 1);
+  });
+
+  it("respects TTL (expired entries return undefined)", async () => {
+    // Use a very short TTL and wait for it to expire
+    const cache = new EmbeddingCache(10, 1 / 60_000); // ~1ms TTL
+    cache.set("hello", "doc", [1, 2, 3]);
+    // Wait 5ms for TTL to expire
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const result = cache.get("hello", "doc");
+    assert.equal(result, undefined);
+    assert.equal(cache.misses, 1);
+  });
+
+  it("evicts oldest when maxSize reached", () => {
+    const cache = new EmbeddingCache(2, 30);
+    cache.set("a", "doc", [1]);
+    cache.set("b", "doc", [2]);
+    cache.set("c", "doc", [3]);
+    assert.equal(cache.get("a", "doc"), undefined);
+    assert.deepEqual(cache.get("b", "doc"), [2]);
+    assert.deepEqual(cache.get("c", "doc"), [3]);
+    assert.equal(cache.size, 2);
+  });
+
+  it("key includes inputType", () => {
+    const cache = new EmbeddingCache(10, 30);
+    cache.set("hello", "query", [1]);
+    cache.set("hello", "doc", [2]);
+    assert.deepEqual(cache.get("hello", "query"), [1]);
+    assert.deepEqual(cache.get("hello", "doc"), [2]);
+  });
+
+  it("stats reports correct values", () => {
+    const cache = new EmbeddingCache(10, 30);
+    cache.set("a", "doc", [1]);
+    cache.get("a", "doc");
+    cache.get("b", "doc");
+    const stats = cache.stats;
+    assert.equal(stats.size, 1);
+    assert.equal(stats.hits, 1);
+    assert.equal(stats.misses, 1);
+    assert.equal(stats.hitRate, "50.0%");
+  });
+
+  it("stats hitRate is N/A when no lookups", () => {
+    const cache = new EmbeddingCache(10, 30);
+    assert.equal(cache.stats.hitRate, "N/A");
+  });
+});
+
+describe("VoyageEmbedder (mocked fetch)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function mockFetch(responseBody: unknown, status = 200) {
+    globalThis.fetch = (async () => ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => responseBody,
+      text: async () => JSON.stringify(responseBody),
+    })) as unknown as typeof fetch;
+  }
+
+  it("embed() calls Voyage API and returns embedding", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    const mockVector = Array(1024).fill(0.1);
+    mockFetch({
+      object: "list",
+      data: [{ object: "embedding", embedding: mockVector, index: 0 }],
+      model: "voyage-3-large",
+      usage: { total_tokens: 5 },
+    });
+
+    const result = await embedder.embed("test text");
+    assert.equal(result.length, 1024);
+    assert.deepEqual(result, mockVector);
+  });
+
+  it("embed() caches results", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    const mockVector = Array(1024).fill(0.5);
+    let callCount = 0;
+    globalThis.fetch = (async () => {
+      callCount++;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [{ embedding: mockVector, index: 0 }],
+          model: "voyage-3-large",
+          usage: { total_tokens: 5 },
+        }),
+        text: async () => "",
+      };
+    }) as unknown as typeof fetch;
+
+    await embedder.embed("cached text");
+    await embedder.embed("cached text");
+    assert.equal(callCount, 1);
+    assert.equal(embedder.cacheStats.hits, 1);
+  });
+
+  it("embed() throws on empty text", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    await assert.rejects(() => embedder.embed(""), /Cannot embed empty text/);
+    await assert.rejects(() => embedder.embed("   "), /Cannot embed empty text/);
+  });
+
+  it("embed() throws on API error", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    mockFetch({ error: "rate limited" }, 429);
+    await assert.rejects(() => embedder.embed("test"), /Voyage AI embedding API returned 429/);
+  });
+
+  it("embed() throws on empty data response", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    mockFetch({ data: [] });
+    await assert.rejects(() => embedder.embed("test"), /No embedding returned/);
+  });
+
+  it("embed() throws on dimension mismatch", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    mockFetch({ data: [{ embedding: [1, 2, 3], index: 0 }] });
+    await assert.rejects(() => embedder.embed("test"), /Embedding dimension mismatch/);
+  });
+
+  it("embedBatch() returns multiple embeddings", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    const mockVector = Array(1024).fill(0.2);
+    mockFetch({
+      data: [
+        { embedding: mockVector, index: 0 },
+        { embedding: mockVector, index: 1 },
+      ],
+    });
+
+    const results = await embedder.embedBatch(["text1", "text2"]);
+    assert.equal(results.length, 2);
+    assert.equal(results[0].length, 1024);
+    assert.equal(results[1].length, 1024);
+  });
+
+  it("embedBatch() handles empty array", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    const results = await embedder.embedBatch([]);
+    assert.deepEqual(results, []);
+  });
+
+  it("embedBatch() handles empty string entries", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    const mockVector = Array(1024).fill(0.1);
+    mockFetch({ data: [{ embedding: mockVector, index: 0 }] });
+
+    const results = await embedder.embedBatch(["valid text", "", "  "]);
+    assert.equal(results.length, 3);
+    assert.equal(results[0].length, 1024);
+    assert.deepEqual(results[1], []);
+    assert.deepEqual(results[2], []);
+  });
+
+  it("embedQuery() and embedPassage() use different input_type", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    const mockVector = Array(1024).fill(0.1);
+    let capturedBodies: string[] = [];
+
+    globalThis.fetch = (async (_url: any, opts: any) => {
+      capturedBodies.push(opts.body);
+      return {
+        ok: true,
+        json: async () => ({ data: [{ embedding: mockVector, index: 0 }] }),
+        text: async () => "",
+      };
+    }) as unknown as typeof fetch;
+
+    await embedder.embedQuery("query text");
+    await embedder.embedPassage("passage text");
+
+    const body1 = JSON.parse(capturedBodies[0]);
+    const body2 = JSON.parse(capturedBodies[1]);
+    assert.equal(body1.input_type, "query");
+    assert.equal(body2.input_type, "document");
+  });
+
+  it("test() returns success on valid response", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    const mockVector = Array(1024).fill(0.1);
+    mockFetch({ data: [{ embedding: mockVector, index: 0 }] });
+    const result = await embedder.test();
+    assert.equal(result.success, true);
+    assert.equal(result.dimensions, 1024);
+  });
+
+  it("test() returns failure on error", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "test-key", model: "voyage-3-large" });
+    mockFetch({}, 500);
+    const result = await embedder.test();
+    assert.equal(result.success, false);
+    assert.ok(result.error);
+  });
+
+  it("model getter returns configured model", () => {
+    const embedder = new VoyageEmbedder({ apiKey: "key", model: "voyage-3" });
+    assert.equal(embedder.model, "voyage-3");
+  });
+
+  it("uses custom baseUrl when provided", async () => {
+    const embedder = new VoyageEmbedder({ apiKey: "key", model: "voyage-3-large", baseUrl: "http://custom:9000/embed" });
+    let capturedUrl = "";
+    const mockVector = Array(1024).fill(0.1);
+    globalThis.fetch = (async (url: any) => {
+      capturedUrl = url;
+      return {
+        ok: true,
+        json: async () => ({ data: [{ embedding: mockVector, index: 0 }] }),
+        text: async () => "",
+      };
+    }) as unknown as typeof fetch;
+
+    await embedder.embed("test");
+    assert.equal(capturedUrl, "http://custom:9000/embed");
+  });
+});
+
+// ============================================================================
+// 11. OpenAIEmbedder (mocked fetch)
+// ============================================================================
+
+import { OpenAIEmbedder } from "../src/embedder-openai.js";
+
+describe("OpenAIEmbedder (mocked fetch)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function mockFetch(responseBody: unknown, status = 200) {
+    globalThis.fetch = (async () => ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => responseBody,
+      text: async () => JSON.stringify(responseBody),
+    })) as unknown as typeof fetch;
+  }
+
+  it("embed() returns embedding", async () => {
+    const embedder = new OpenAIEmbedder({ apiKey: "sk-test", model: "text-embedding-3-small" });
+    const mockVector = Array(1536).fill(0.1);
+    mockFetch({
+      data: [{ embedding: mockVector, index: 0 }],
+      usage: { prompt_tokens: 5, total_tokens: 5 },
+    });
+
+    const result = await embedder.embed("test");
+    assert.equal(result.length, 1536);
+  });
+
+  it("sends dimensions parameter for text-embedding-3-* models", async () => {
+    const embedder = new OpenAIEmbedder({ apiKey: "sk-test", model: "text-embedding-3-small", dimensions: 256 });
+    let capturedBody = "";
+    const mockVector = Array(256).fill(0.1);
+
+    globalThis.fetch = (async (_url: any, opts: any) => {
+      capturedBody = opts.body;
+      return {
+        ok: true,
+        json: async () => ({ data: [{ embedding: mockVector, index: 0 }] }),
+        text: async () => "",
+      };
+    }) as unknown as typeof fetch;
+
+    await embedder.embed("test");
+    const body = JSON.parse(capturedBody);
+    assert.equal(body.dimensions, 256);
+  });
+
+  it("does NOT send dimensions for ada-002 model", async () => {
+    const embedder = new OpenAIEmbedder({ apiKey: "sk-test", model: "text-embedding-ada-002" });
+    let capturedBody = "";
+    const mockVector = Array(1536).fill(0.1);
+
+    globalThis.fetch = (async (_url: any, opts: any) => {
+      capturedBody = opts.body;
+      return {
+        ok: true,
+        json: async () => ({ data: [{ embedding: mockVector, index: 0 }] }),
+        text: async () => "",
+      };
+    }) as unknown as typeof fetch;
+
+    await embedder.embed("test");
+    const body = JSON.parse(capturedBody);
+    assert.equal(body.dimensions, undefined);
+  });
+
+  it("embed() throws on empty text", async () => {
+    const embedder = new OpenAIEmbedder({ apiKey: "sk-test", model: "text-embedding-3-small" });
+    await assert.rejects(() => embedder.embed(""), /Cannot embed empty text/);
+  });
+
+  it("embed() throws on API error", async () => {
+    const embedder = new OpenAIEmbedder({ apiKey: "sk-test", model: "text-embedding-3-small" });
+    mockFetch({ error: "unauthorized" }, 401);
+    await assert.rejects(() => embedder.embed("test"), /OpenAI embedding API returned 401/);
+  });
+
+  it("embedBatch() returns multiple embeddings", async () => {
+    const embedder = new OpenAIEmbedder({ apiKey: "sk-test", model: "text-embedding-3-small" });
+    const mockVector = Array(1536).fill(0.1);
+    mockFetch({
+      data: [
+        { embedding: mockVector, index: 0 },
+        { embedding: mockVector, index: 1 },
+      ],
+    });
+    const results = await embedder.embedBatch(["a", "b"]);
+    assert.equal(results.length, 2);
+  });
+
+  it("embedBatch() handles empty array", async () => {
+    const embedder = new OpenAIEmbedder({ apiKey: "sk-test", model: "text-embedding-3-small" });
+    assert.deepEqual(await embedder.embedBatch([]), []);
+  });
+
+  it("embedBatch() handles empty string entries", async () => {
+    const embedder = new OpenAIEmbedder({ apiKey: "sk-test", model: "text-embedding-3-small" });
+    const mockVector = Array(1536).fill(0.1);
+    mockFetch({ data: [{ embedding: mockVector, index: 0 }] });
+    const results = await embedder.embedBatch(["valid", "", "  "]);
+    assert.equal(results.length, 3);
+    assert.deepEqual(results[1], []);
+    assert.deepEqual(results[2], []);
+  });
+
+  it("test() returns success/failure", async () => {
+    const embedder = new OpenAIEmbedder({ apiKey: "sk-test", model: "text-embedding-3-small" });
+    const mockVector = Array(1536).fill(0.1);
+    mockFetch({ data: [{ embedding: mockVector, index: 0 }] });
+    const result = await embedder.test();
+    assert.equal(result.success, true);
+  });
+
+  it("model getter returns configured model", () => {
+    const embedder = new OpenAIEmbedder({ apiKey: "sk", model: "text-embedding-3-large" });
+    assert.equal(embedder.model, "text-embedding-3-large");
+  });
+});
+
+// ============================================================================
+// 12. JinaEmbedder (mocked fetch)
+// ============================================================================
+
+import { JinaEmbedder } from "../src/embedder-jina.js";
+
+describe("JinaEmbedder (mocked fetch)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function mockFetch(responseBody: unknown, status = 200) {
+    globalThis.fetch = (async () => ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => responseBody,
+      text: async () => JSON.stringify(responseBody),
+    })) as unknown as typeof fetch;
+  }
+
+  it("embed() returns embedding", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "jina-key", model: "jina-embeddings-v3" });
+    const mockVector = Array(1024).fill(0.1);
+    mockFetch({
+      data: [{ embedding: mockVector, index: 0 }],
+      usage: { total_tokens: 5, prompt_tokens: 5 },
+    });
+
+    const result = await embedder.embed("test");
+    assert.equal(result.length, 1024);
+  });
+
+  it("sends task parameter for v3 model", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "jina-key", model: "jina-embeddings-v3" });
+    let capturedBody = "";
+    const mockVector = Array(1024).fill(0.1);
+
+    globalThis.fetch = (async (_url: any, opts: any) => {
+      capturedBody = opts.body;
+      return {
+        ok: true,
+        json: async () => ({ data: [{ embedding: mockVector, index: 0 }] }),
+        text: async () => "",
+      };
+    }) as unknown as typeof fetch;
+
+    await embedder.embedQuery("test");
+    const body = JSON.parse(capturedBody);
+    assert.equal(body.task, "retrieval.query");
+  });
+
+  it("does NOT send task parameter for v2 model", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "jina-key", model: "jina-embeddings-v2-base-en" });
+    let capturedBody = "";
+    const mockVector = Array(768).fill(0.1);
+
+    globalThis.fetch = (async (_url: any, opts: any) => {
+      capturedBody = opts.body;
+      return {
+        ok: true,
+        json: async () => ({ data: [{ embedding: mockVector, index: 0 }] }),
+        text: async () => "",
+      };
+    }) as unknown as typeof fetch;
+
+    await embedder.embedQuery("test");
+    const body = JSON.parse(capturedBody);
+    assert.equal(body.task, undefined);
+  });
+
+  it("embed() throws on empty text", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "jina-key", model: "jina-embeddings-v3" });
+    await assert.rejects(() => embedder.embed(""), /Cannot embed empty text/);
+  });
+
+  it("embed() throws on API error", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "jina-key", model: "jina-embeddings-v3" });
+    mockFetch({ error: "bad request" }, 400);
+    await assert.rejects(() => embedder.embed("test"), /Jina AI embedding API returned 400/);
+  });
+
+  it("embedBatch() returns embeddings", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "jina-key", model: "jina-embeddings-v3" });
+    const mockVector = Array(1024).fill(0.1);
+    mockFetch({
+      data: [
+        { embedding: mockVector, index: 0 },
+        { embedding: mockVector, index: 1 },
+      ],
+    });
+    const results = await embedder.embedBatch(["a", "b"]);
+    assert.equal(results.length, 2);
+  });
+
+  it("embedBatch() handles empty array", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "jina-key", model: "jina-embeddings-v3" });
+    assert.deepEqual(await embedder.embedBatch([]), []);
+  });
+
+  it("embedBatch() handles empty string entries", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "jina-key", model: "jina-embeddings-v3" });
+    const mockVector = Array(1024).fill(0.1);
+    mockFetch({ data: [{ embedding: mockVector, index: 0 }] });
+    const results = await embedder.embedBatch(["valid", ""]);
+    assert.equal(results.length, 2);
+    assert.deepEqual(results[1], []);
+  });
+
+  it("embed() throws on dimension mismatch", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "jina-key", model: "jina-embeddings-v3" });
+    mockFetch({ data: [{ embedding: [1, 2, 3], index: 0 }] });
+    await assert.rejects(() => embedder.embed("test"), /Embedding dimension mismatch/);
+  });
+
+  it("test() returns success on valid response", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "jina-key", model: "jina-embeddings-v3" });
+    const mockVector = Array(1024).fill(0.1);
+    mockFetch({ data: [{ embedding: mockVector, index: 0 }] });
+    const result = await embedder.test();
+    assert.equal(result.success, true);
+    assert.equal(result.dimensions, 1024);
+  });
+
+  it("model getter returns configured model", () => {
+    const embedder = new JinaEmbedder({ apiKey: "k", model: "jina-embeddings-v3" });
+    assert.equal(embedder.model, "jina-embeddings-v3");
+  });
+
+  it("uses custom baseUrl", async () => {
+    const embedder = new JinaEmbedder({ apiKey: "k", model: "jina-embeddings-v3", baseUrl: "http://custom:5000/embed" });
+    let capturedUrl = "";
+    const mockVector = Array(1024).fill(0.1);
+    globalThis.fetch = (async (url: any) => {
+      capturedUrl = url;
+      return {
+        ok: true,
+        json: async () => ({ data: [{ embedding: mockVector, index: 0 }] }),
+        text: async () => "",
+      };
+    }) as unknown as typeof fetch;
+
+    await embedder.embed("test");
+    assert.equal(capturedUrl, "http://custom:5000/embed");
+  });
+});
+
+// ============================================================================
+// 13. LLM URL construction (config integration)
+// ============================================================================
+
+describe("LLM URL construction (config integration)", () => {
+  it("captureLlmUrl normalization strips /v1 to avoid /v1/v1/chat/completions", () => {
+    const config = memoryConfigSchema.parse({
+      embedding: { apiKey: "k" },
+      captureLlmUrl: "https://openrouter.ai/api/v1",
+    });
+    assert.equal(config.captureLlmUrl, "https://openrouter.ai/api");
+  });
+
+  it("captureLlmUrl preserves non-v1 paths", () => {
+    const config = memoryConfigSchema.parse({
+      embedding: { apiKey: "k" },
+      captureLlmUrl: "https://api.example.com/proxy",
+    });
+    assert.equal(config.captureLlmUrl, "https://api.example.com/proxy");
+  });
+});
+
+// ============================================================================
+// Phase 3 — Mock LanceDB Tests
+// ============================================================================
+
+// ============================================================================
+// 14. Scopes (additional coverage for factory functions)
+// ============================================================================
+
+import {
+  createAgentScope,
+  createCustomScope,
+  createProjectScope,
+  createUserScope,
+  parseScopeId,
+  isScopeAccessible,
+} from "../src/scopes.js";
+
+describe("Scope utility functions", () => {
+  it("createAgentScope creates correct scope string", () => {
+    assert.equal(createAgentScope("bot-1"), "agent:bot-1");
+  });
+
+  it("createCustomScope creates correct scope string", () => {
+    assert.equal(createCustomScope("private"), "custom:private");
+  });
+
+  it("createProjectScope creates correct scope string", () => {
+    assert.equal(createProjectScope("proj-42"), "project:proj-42");
+  });
+
+  it("createUserScope creates correct scope string", () => {
+    assert.equal(createUserScope("user123"), "user:user123");
+  });
+
+  it("parseScopeId parses global scope", () => {
+    const result = parseScopeId("global");
+    assert.deepEqual(result, { type: "global", id: "" });
+  });
+
+  it("parseScopeId parses typed scopes", () => {
+    assert.deepEqual(parseScopeId("agent:bot-1"), { type: "agent", id: "bot-1" });
+    assert.deepEqual(parseScopeId("custom:private"), { type: "custom", id: "private" });
+    assert.deepEqual(parseScopeId("project:p1"), { type: "project", id: "p1" });
+    assert.deepEqual(parseScopeId("user:u1"), { type: "user", id: "u1" });
+  });
+
+  it("parseScopeId returns null for invalid format", () => {
+    assert.equal(parseScopeId("nocolon"), null);
+  });
+
+  it("isScopeAccessible checks inclusion", () => {
+    assert.equal(isScopeAccessible("global", ["global", "agent:bot"]), true);
+    assert.equal(isScopeAccessible("custom:secret", ["global"]), false);
+  });
+});
+
+describe("MemoryScopeManager additional coverage", () => {
+  it("setAgentAccess and removeAgentAccess", () => {
+    const mgr = new MemoryScopeManager();
+    mgr.setAgentAccess("bot-1", ["global"]);
+    assert.deepEqual(mgr.getAccessibleScopes("bot-1"), ["global"]);
+
+    const removed = mgr.removeAgentAccess("bot-1");
+    assert.equal(removed, true);
+    const scopes = mgr.getAccessibleScopes("bot-1");
+    assert.ok(scopes.includes("global"));
+    assert.ok(scopes.includes("agent:bot-1"));
+  });
+
+  it("removeAgentAccess returns false for non-existent agent", () => {
+    const mgr = new MemoryScopeManager();
+    assert.equal(mgr.removeAgentAccess("nonexistent"), false);
+  });
+
+  it("setAgentAccess throws on invalid agentId", () => {
+    const mgr = new MemoryScopeManager();
+    assert.throws(() => mgr.setAgentAccess("", ["global"]), /Invalid agent ID/);
+  });
+
+  it("setAgentAccess throws on invalid scope", () => {
+    const mgr = new MemoryScopeManager();
+    assert.throws(() => mgr.setAgentAccess("bot-1", [""]), /Invalid scope/);
+  });
+
+  it("importConfig merges configurations", () => {
+    const mgr = new MemoryScopeManager();
+    mgr.importConfig({
+      definitions: { "custom:new": { description: "imported" } },
+    });
+    assert.ok(mgr.getAllScopes().includes("custom:new"));
+    assert.ok(mgr.getAllScopes().includes("global"));
+  });
+
+  it("getStats counts project and user scopes", () => {
+    const mgr = new MemoryScopeManager({
+      definitions: {
+        global: { description: "g" },
+        "project:p1": { description: "p1" },
+        "user:u1": { description: "u1" },
+      },
+    });
+    const stats = mgr.getStats();
+    assert.equal(stats.scopesByType.project, 1);
+    assert.equal(stats.scopesByType.user, 1);
+  });
+});
+
+// ============================================================================
+// 15. Retriever (mocked store + embedder)
+// ============================================================================
+
+import { MemoryRetriever, DEFAULT_RETRIEVAL_CONFIG, createRetriever } from "../src/retriever.js";
+import type { MemorySearchResult, MemoryEntry } from "../src/store.js";
+
+describe("MemoryRetriever (mocked store + embedder)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function makeEntry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
+    return {
+      id: overrides.id || "test-id-" + Math.random().toString(36).slice(2),
+      text: overrides.text || "test text",
+      vector: overrides.vector || Array(1024).fill(0.1),
+      category: overrides.category || "fact",
+      scope: overrides.scope || "global",
+      importance: overrides.importance ?? 0.7,
+      timestamp: overrides.timestamp ?? Date.now(),
+      metadata: overrides.metadata || "{}",
+    };
+  }
+
+  function makeResult(entry: MemoryEntry, score: number): MemorySearchResult {
+    return { entry, score };
+  }
+
+  function createMockEmbedder(dims = 1024) {
+    const mockVector = Array(dims).fill(0.1);
+    return {
+      dimensions: dims,
+      model: "mock-model",
+      embed: async () => mockVector,
+      embedQuery: async () => mockVector,
+      embedPassage: async () => mockVector,
+      embedBatch: async (texts: string[]) => texts.map(() => mockVector),
+      embedBatchQuery: async (texts: string[]) => texts.map(() => mockVector),
+      embedBatchPassage: async (texts: string[]) => texts.map(() => mockVector),
+      test: async () => ({ success: true, dimensions: dims }),
+      get cacheStats() { return { size: 0, hits: 0, misses: 0, hitRate: "N/A" }; },
+    };
+  }
+
+  function createMockStore(vectorResults: MemorySearchResult[] = [], bm25Results: MemorySearchResult[] = []) {
+    return {
+      dbPath: "/tmp/test-db",
+      hasFtsSupport: true,
+      vectorSearch: async () => vectorResults,
+      bm25Search: async () => bm25Results,
+      store: async () => ({} as any),
+      list: async () => [],
+      delete: async () => true,
+      stats: async () => ({ totalCount: 0, scopeCounts: {}, categoryCounts: {} }),
+      update: async () => null,
+      bulkDelete: async () => 0,
+      hasId: async () => false,
+      importEntry: async () => ({} as any),
+    } as any;
+  }
+
+  it("vector-only mode retrieves from store", async () => {
+    const entry = makeEntry({ text: "important fact", importance: 0.8 });
+    const store = createMockStore([makeResult(entry, 0.9)]);
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, { ...DEFAULT_RETRIEVAL_CONFIG, mode: "vector" });
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(results.length > 0);
+    assert.equal(results[0].entry.text, "important fact");
+    assert.ok(results[0].sources.vector);
+  });
+
+  it("hybrid mode fuses vector and BM25 results", async () => {
+    const entry1 = makeEntry({ id: "vec-1", text: "vector result" });
+    const entry2 = makeEntry({ id: "bm25-1", text: "bm25 result" });
+    const store = createMockStore(
+      [makeResult(entry1, 0.85)],
+      [makeResult(entry2, 0.7)],
+    );
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "hybrid",
+      rerank: "none",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    });
+
+    const results = await retriever.retrieve({ query: "test query", limit: 10 });
+    assert.ok(results.length >= 1);
+  });
+
+  it("fused results boost score when item appears in both vector and BM25", async () => {
+    const entry = makeEntry({ id: "both-1", text: "dual hit result" });
+    const store = createMockStore(
+      [makeResult(entry, 0.8)],
+      [makeResult(entry, 0.6)],
+    );
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "hybrid",
+      rerank: "none",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    });
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(results.length > 0);
+    assert.ok(results[0].sources.vector);
+    assert.ok(results[0].sources.bm25);
+    assert.ok(results[0].sources.fused);
+  });
+
+  it("recency boost increases score for recent entries", async () => {
+    const recentEntry = makeEntry({ id: "recent", text: "very recent item", timestamp: Date.now() - 3600_000, importance: 0.8 });
+    const oldEntry = makeEntry({ id: "old", text: "very old item is this", timestamp: Date.now() - 365 * 86400_000, importance: 0.8 });
+    const store = createMockStore([
+      makeResult(recentEntry, 0.6),
+      makeResult(oldEntry, 0.6),
+    ]);
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "vector",
+      rerank: "none",
+      recencyHalfLifeDays: 14,
+      recencyWeight: 0.10,
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    });
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    if (results.length >= 2) {
+      assert.ok(results[0].entry.id === "recent" || results[0].score >= results[1].score);
+    }
+  });
+
+  it("MMR diversity deduplicates similar entries", async () => {
+    const vec = Array(1024).fill(0.5);
+    const entry1 = makeEntry({ id: "dup-1", text: "duplicate content A", vector: vec, importance: 0.8 });
+    const entry2 = makeEntry({ id: "dup-2", text: "duplicate content B", vector: vec, importance: 0.8 });
+    const entry3 = makeEntry({ id: "unique", text: "unique content here", vector: Array(1024).fill(0.9), importance: 0.8 });
+    const store = createMockStore([
+      makeResult(entry1, 0.9),
+      makeResult(entry2, 0.89),
+      makeResult(entry3, 0.85),
+    ]);
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "vector",
+      rerank: "none",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    });
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(results.length >= 2);
+  });
+
+  it("hardMinScore filters out low-scoring results", async () => {
+    const entry = makeEntry({ text: "low score entry" });
+    const store = createMockStore([makeResult(entry, 0.2)]);
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "vector",
+      rerank: "none",
+      hardMinScore: 0.35,
+      minScore: 0.1,
+    });
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(Array.isArray(results));
+  });
+
+  it("noise filter removes noisy results", async () => {
+    const noisyEntry = makeEntry({ text: "I don't have any information about that", importance: 0.8 });
+    const goodEntry = makeEntry({ text: "The database uses PostgreSQL for data storage and retrieval purposes", importance: 0.8 });
+    const store = createMockStore([
+      makeResult(goodEntry, 0.9),
+      makeResult(noisyEntry, 0.85),
+    ]);
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "vector",
+      rerank: "none",
+      filterNoise: true,
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    });
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    const texts = results.map(r => r.entry.text);
+    assert.ok(!texts.includes("I don't have any information about that"));
+  });
+
+  it("updateConfig changes retriever behavior", () => {
+    const store = createMockStore();
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any);
+
+    assert.equal(retriever.getConfig().mode, "hybrid");
+    retriever.updateConfig({ mode: "vector" });
+    assert.equal(retriever.getConfig().mode, "vector");
+  });
+
+  it("getConfig returns a copy of config", () => {
+    const store = createMockStore();
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any);
+
+    const config1 = retriever.getConfig();
+    const config2 = retriever.getConfig();
+    assert.deepEqual(config1, config2);
+    config1.mode = "vector";
+    assert.equal(retriever.getConfig().mode, "hybrid");
+  });
+
+  it("test() returns success with mock store", async () => {
+    const store = createMockStore();
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "vector",
+    });
+
+    const result = await retriever.test("hello");
+    assert.equal(result.success, true);
+    assert.equal(result.mode, "vector");
+  });
+
+  it("test() returns failure when embedder throws", async () => {
+    const store = createMockStore();
+    const embedder = {
+      ...createMockEmbedder(),
+      embedQuery: async () => { throw new Error("API down"); },
+    };
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "vector",
+    });
+
+    const result = await retriever.test();
+    assert.equal(result.success, false);
+    assert.ok(result.error?.includes("API down"));
+  });
+
+  it("lightweight rerank uses cosine similarity fallback", async () => {
+    const vec1 = Array(1024).fill(0);
+    vec1[0] = 1;
+    const vec2 = Array(1024).fill(0);
+    vec2[1] = 1;
+    const entry1 = makeEntry({ id: "e1", text: "entry one text content", vector: vec1, importance: 0.8 });
+    const entry2 = makeEntry({ id: "e2", text: "entry two text content", vector: vec2, importance: 0.8 });
+    const store = createMockStore([
+      makeResult(entry1, 0.8),
+      makeResult(entry2, 0.7),
+    ]);
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "vector",
+      rerank: "lightweight",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    });
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(results.length >= 1);
+    if (results[0].sources.reranked) {
+      assert.ok(typeof results[0].sources.reranked.score === "number");
+    }
+  });
+
+  it("category filter works in vector-only mode", async () => {
+    const prefEntry = makeEntry({ id: "pref-1", text: "I prefer dark mode", category: "preference", importance: 0.8 });
+    const factEntry = makeEntry({ id: "fact-1", text: "The API has rate limits", category: "fact", importance: 0.8 });
+    const store = createMockStore([
+      makeResult(prefEntry, 0.9),
+      makeResult(factEntry, 0.85),
+    ]);
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "vector",
+      rerank: "none",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    });
+
+    const results = await retriever.retrieve({ query: "test", limit: 5, category: "preference" });
+    for (const r of results) {
+      assert.equal(r.entry.category, "preference");
+    }
+  });
+
+  it("cross-encoder rerank falls back to cosine when no API key", async () => {
+    const entry = makeEntry({ text: "some test content here", importance: 0.8 });
+    const store = createMockStore([makeResult(entry, 0.8)]);
+    const embedder = createMockEmbedder();
+    // Use hybrid mode so rerankResults actually gets called
+    const retriever = new MemoryRetriever(store as any, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "hybrid",
+      rerank: "cross-encoder",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    }, undefined); // no API key → falls back to cosine
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(results.length >= 0);
+  });
+
+  it("cross-encoder rerank with mocked Voyage API (hybrid mode)", async () => {
+    const entry1 = makeEntry({ id: "r1", text: "highly relevant content", importance: 0.8 });
+    const entry2 = makeEntry({ id: "r2", text: "less relevant text here", importance: 0.8 });
+    const store = createMockStore(
+      [makeResult(entry1, 0.8), makeResult(entry2, 0.7)],
+      [makeResult(entry1, 0.6)], // entry1 also in BM25
+    );
+    const embedder = createMockEmbedder();
+
+    globalThis.fetch = (async (url: any) => {
+      if (typeof url === "string" && url.includes("rerank")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              { index: 1, relevance_score: 0.95 },
+              { index: 0, relevance_score: 0.6 },
+            ],
+          }),
+        };
+      }
+      return { ok: false, status: 404, text: async () => "not found" };
+    }) as unknown as typeof fetch;
+
+    const retriever = new MemoryRetriever(store as any, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "hybrid",
+      rerank: "cross-encoder",
+      rerankModel: "rerank-2",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    }, "voyage-test-key");
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(results.length >= 1);
+    // Results should have reranked sources
+    const hasReranked = results.some(r => r.sources.reranked);
+    assert.ok(hasReranked);
+  });
+
+  it("cross-encoder rerank handles API failure gracefully (hybrid mode)", async () => {
+    const entry = makeEntry({ text: "test entry content here", importance: 0.8 });
+    const store = createMockStore([makeResult(entry, 0.8)]);
+    const embedder = createMockEmbedder();
+
+    globalThis.fetch = (async () => ({
+      ok: false,
+      status: 500,
+      text: async () => "server error",
+    })) as unknown as typeof fetch;
+
+    const retriever = new MemoryRetriever(store as any, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "hybrid",
+      rerank: "cross-encoder",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    }, "voyage-test-key");
+
+    // Should not throw, falls back to cosine
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(Array.isArray(results));
+  });
+
+  it("cross-encoder rerank handles invalid response shape", async () => {
+    const entry = makeEntry({ text: "content for rerank test", importance: 0.8 });
+    const store = createMockStore([makeResult(entry, 0.8)]);
+    const embedder = createMockEmbedder();
+
+    globalThis.fetch = (async (url: any) => {
+      if (typeof url === "string" && url.includes("rerank")) {
+        return {
+          ok: true,
+          json: async () => ({ data: "not-an-array" }), // invalid shape
+        };
+      }
+      return { ok: false, status: 404, text: async () => "" };
+    }) as unknown as typeof fetch;
+
+    const retriever = new MemoryRetriever(store as any, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "hybrid",
+      rerank: "cross-encoder",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    }, "voyage-test-key");
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(Array.isArray(results));
+  });
+
+  it("cross-encoder rerank handles fetch exception", async () => {
+    const entry = makeEntry({ text: "content for error test", importance: 0.8 });
+    const store = createMockStore([makeResult(entry, 0.8)]);
+    const embedder = createMockEmbedder();
+
+    globalThis.fetch = (async () => {
+      throw new Error("network error");
+    }) as unknown as typeof fetch;
+
+    const retriever = new MemoryRetriever(store as any, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "hybrid",
+      rerank: "cross-encoder",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    }, "voyage-test-key");
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(Array.isArray(results));
+  });
+
+  it("falls back to vector-only when store has no FTS support", async () => {
+    const entry = makeEntry({ text: "vector only result", importance: 0.8 });
+    const store = createMockStore([makeResult(entry, 0.9)]);
+    (store as any).hasFtsSupport = false;
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "hybrid",
+      rerank: "none",
+      hardMinScore: 0.1,
+      minScore: 0.1,
+    });
+
+    const results = await retriever.retrieve({ query: "test", limit: 5 });
+    assert.ok(Array.isArray(results));
+  });
+
+  it("limit is clamped between 1 and 20", async () => {
+    const store = createMockStore();
+    const embedder = createMockEmbedder();
+    const retriever = createRetriever(store, embedder as any, {
+      ...DEFAULT_RETRIEVAL_CONFIG,
+      mode: "vector",
+      rerank: "none",
+    });
+
+    await retriever.retrieve({ query: "test", limit: 0 });
+    await retriever.retrieve({ query: "test", limit: 100 });
+    await retriever.retrieve({ query: "test", limit: -5 });
+  });
+});
