@@ -23,3 +23,13 @@ jobs:
         run: npm ci
       - name: Run unit tests
         run: npx tsx --test test/unit.test.ts
+      - name: Run unit tests with coverage
+        if: matrix.node-version == 22
+        run: npx c8 --reporter=lcov --reporter=text npx tsx --test test/unit.test.ts
+      - name: Upload coverage to Codecov
+        if: matrix.node-version == 22
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage/lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
