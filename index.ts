@@ -112,11 +112,35 @@ async function callLlmForCaptureJudgment(
   configuredLlmUrl?: string,
 ): Promise<LlmMemoryJudgment | null> {
   // Try configured URL first, then env var, then default fallbacks
+  const normalizeBaseUrl = (url: string): string => {
+    let u = url.trim().replace(/\/+$/, "");
+    if (u.toLowerCase().endsWith("/v1")) u = u.slice(0, -3);
+    return u.replace(/\/+$/, "");
+  };
+
+  const getHost = (url: string): string | null => {
+    try { return new URL(url).host; } catch {
+      try { return new URL(`http://${url}`).host; } catch { return null; }
+    }
+  };
+
   const gatewayUrls: string[] = [];
-  if (configuredLlmUrl) gatewayUrls.push(configuredLlmUrl);
-  if (process.env.OPENCLAW_GATEWAY_URL) gatewayUrls.push(process.env.OPENCLAW_GATEWAY_URL);
-  if (!gatewayUrls.some(u => u.includes("localhost:3000"))) gatewayUrls.push("http://localhost:3000");
-  if (!gatewayUrls.some(u => u.includes("localhost:8080"))) gatewayUrls.push("http://localhost:8080");
+  const seenHosts = new Set<string>();
+
+  const addUrl = (url?: string) => {
+    if (!url) return;
+    const normalized = normalizeBaseUrl(url);
+    const host = getHost(normalized);
+    if (host && !seenHosts.has(host)) {
+      seenHosts.add(host);
+      gatewayUrls.push(normalized);
+    }
+  };
+
+  addUrl(configuredLlmUrl);
+  addUrl(process.env.OPENCLAW_GATEWAY_URL);
+  if (!seenHosts.has("localhost:3000")) addUrl("http://localhost:3000");
+  if (!seenHosts.has("localhost:8080")) addUrl("http://localhost:8080");
 
   const requestBody = JSON.stringify({
     model,
