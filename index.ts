@@ -113,6 +113,15 @@ async function callLlmForCaptureJudgment(
   configuredLlmUrl?: string,
 ): Promise<LlmMemoryJudgment | null> {
   // Try configured URL first, then env var, then default fallbacks
+  //
+  // Deduplication strategy: We deduplicate by host:port to avoid redundant
+  // timeout delays when multiple configs point to the same endpoint. This means
+  // that if both "http://localhost:3000" and "https://localhost:3000" are
+  // configured, only the first one will be tried. This is intentional for
+  // performance - if the first protocol doesn't work, the host is likely down
+  // or misconfigured, and trying alternate protocols would just add latency.
+  // Similarly, different paths on the same host are treated as the same endpoint
+  // since the plugin appends /v1/chat/completions to all base URLs.
 
   const gatewayUrls: string[] = [];
   const seenHosts = new Set<string>();
@@ -122,7 +131,7 @@ async function callLlmForCaptureJudgment(
     const normalized = normalizeBaseUrl(url);
     const host = getUrlHost(normalized);
     if (!host) {
-      console.warn(`[Vidya] Unable to parse URL: ${url}`);
+      logger.warn(`[Vidya] Unable to parse URL: ${url}`);
       return;
     }
     if (!seenHosts.has(host)) {
