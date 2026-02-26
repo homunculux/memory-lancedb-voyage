@@ -2,6 +2,7 @@
  * Configuration for memory-lancedb-voyage plugin.
  * Uses a manual parse() pattern matching the built-in memory-lancedb config.ts.
  */
+import { normalizeBaseUrl } from "./utils.js";
 
 import fs from "node:fs";
 import { homedir } from "node:os";
@@ -217,7 +218,7 @@ export const memoryConfigSchema = {
         ? cfg.captureLlmModel
         : "anthropic/claude-haiku-4-5-20251001",
       captureLlmUrl: typeof cfg.captureLlmUrl === "string"
-        ? cfg.captureLlmUrl.trim().replace(/\/v1\/?$/, "").replace(/\/$/, "")
+        ? normalizeBaseUrl(cfg.captureLlmUrl)
         : "",
       enableManagementTools: cfg.enableManagementTools === true,
       retrieval: {
