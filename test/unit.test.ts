@@ -834,4 +834,12 @@ describe("LLM Capture Config", () => {
     const config = memoryConfigSchema.parse({ embedding: { apiKey: "k" }, captureLlmUrl: "http://localhost:3000/" });
     assert.equal(config.captureLlmUrl, "http://localhost:3000");
   });
+
+  it("captureLlmUrl trims surrounding whitespace", () => {
+    const config = memoryConfigSchema.parse({
+      embedding: { apiKey: "k" },
+      captureLlmUrl: "  http://localhost:3000  ",
+    });
+    assert.equal(config.captureLlmUrl, "http://localhost:3000");
+  });
 });
