@@ -2,6 +2,7 @@
  * Memory LanceDB Voyage Plugin
  * LanceDB-backed long-term memory with hybrid retrieval, Voyage AI embedding & reranking
  */
+import { normalizeBaseUrl, getUrlHost } from "./src/utils.js";
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { join, dirname, basename } from "node:path";
@@ -112,17 +113,6 @@ async function callLlmForCaptureJudgment(
   configuredLlmUrl?: string,
 ): Promise<LlmMemoryJudgment | null> {
   // Try configured URL first, then env var, then default fallbacks
-  const normalizeBaseUrl = (url: string): string => {
-    let u = url.trim().replace(/\/+$/, "");
-    if (u.toLowerCase().endsWith("/v1")) u = u.slice(0, -3);
-    return u.replace(/\/+$/, "");
-  };
-
-  const getHost = (url: string): string | null => {
-    try { return new URL(url).host; } catch {
-      try { return new URL(`http://${url}`).host; } catch { return null; }
-    }
-  };
 
   const gatewayUrls: string[] = [];
   const seenHosts = new Set<string>();
@@ -130,7 +120,7 @@ async function callLlmForCaptureJudgment(
   const addUrl = (url?: string) => {
     if (!url) return;
     const normalized = normalizeBaseUrl(url);
-    const host = getHost(normalized);
+    const host = getUrlHost(normalized);
     if (host && !seenHosts.has(host)) {
       seenHosts.add(host);
       gatewayUrls.push(normalized);
