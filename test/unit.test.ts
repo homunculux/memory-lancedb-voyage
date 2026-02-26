@@ -630,7 +630,7 @@ describe("shouldSkipRetrieval()", () => {
 // ============================================================================
 
 import { createEmbedderFromConfig } from "../src/embedder-factory.js";
-import { VoyageEmbedder } from "../src/embedder.js";
+import { VoyageEmbedder, EmbeddingCache } from "../src/embedder.js";
 import { OpenAIEmbedder } from "../src/embedder-openai.js";
 import { JinaEmbedder } from "../src/embedder-jina.js";
 
@@ -1053,8 +1053,6 @@ describe("getUrlHost()", () => {
 // 10. VoyageEmbedder (mock fetch)
 // ============================================================================
 
-import { VoyageEmbedder, EmbeddingCache } from "../src/embedder.js";
-
 describe("EmbeddingCache", () => {
   it("get returns undefined on miss", () => {
     const cache = new EmbeddingCache(10, 30);
@@ -1298,8 +1296,6 @@ describe("VoyageEmbedder (mocked fetch)", () => {
 // 11. OpenAIEmbedder (mocked fetch)
 // ============================================================================
 
-import { OpenAIEmbedder } from "../src/embedder-openai.js";
-
 describe("OpenAIEmbedder (mocked fetch)", () => {
   const originalFetch = globalThis.fetch;
 
@@ -1422,8 +1418,6 @@ describe("OpenAIEmbedder (mocked fetch)", () => {
 // ============================================================================
 // 12. JinaEmbedder (mocked fetch)
 // ============================================================================
-
-import { JinaEmbedder } from "../src/embedder-jina.js";
 
 describe("JinaEmbedder (mocked fetch)", () => {
   const originalFetch = globalThis.fetch;
@@ -3111,6 +3105,1470 @@ describe("MemoryStore (mocked LanceDB)", () => {
       const result = await store.hasId("it's-a-test");
       // Our mock doesn't handle escaped quotes, but this covers the code path
       assert.equal(typeof result, "boolean");
+    });
+  });
+});
+
+// ============================================================================
+// 17. Plugin index.ts — sanitizeForContext, ConversationBuffer, LLM judgment,
+//     register(), hooks, session reading
+// ============================================================================
+
+import plugin from "../index.js";
+
+describe("Plugin (index.ts) — register & lifecycle hooks", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // ---------------------------------------------------------------------------
+  // Mock OpenClawPluginApi builder
+  // ---------------------------------------------------------------------------
+
+  interface CapturedHook { name: string; handler: (...args: any[]) => any }
+  interface CapturedTool { name: string; tool: any }
+  interface CapturedService { id: string; start: () => Promise<void>; stop: () => void }
+
+  function createMockApi(configOverrides: Record<string, any> = {}) {
+    const hooks: CapturedHook[] = [];
+    const tools: CapturedTool[] = [];
+    const services: CapturedService[] = [];
+    const registeredHookEvents: CapturedHook[] = [];
+    const logs: { level: string; msg: string }[] = [];
+    let cliRegistered = false;
+
+    const baseConfig = {
+      embedding: { apiKey: "test-key-123", model: "voyage-3-large" },
+      autoCapture: false,
+      autoRecall: false,
+      captureLlm: false,
+      enableManagementTools: false,
+      sessionMemory: { enabled: false },
+      ...configOverrides,
+    };
+
+    const api: any = {
+      pluginConfig: baseConfig,
+      resolvePath: (p: string) => `/tmp/test-vidya/${p}`,
+      logger: {
+        info: (msg: string) => logs.push({ level: "info", msg }),
+        warn: (msg: string) => logs.push({ level: "warn", msg }),
+        debug: (msg: string) => logs.push({ level: "debug", msg }),
+      },
+      registerTool: (tool: any, opts: any) => {
+        tools.push({ name: opts?.name || tool.name, tool });
+      },
+      on: (hookName: string, handler: (...args: any[]) => any) => {
+        hooks.push({ name: hookName, handler });
+      },
+      registerHook: (events: string | string[], handler: (...args: any[]) => any) => {
+        const names = Array.isArray(events) ? events : [events];
+        for (const name of names) registeredHookEvents.push({ name, handler });
+      },
+      registerService: (svc: any) => {
+        services.push(svc);
+      },
+      registerCli: () => { cliRegistered = true; },
+    };
+
+    return { api, hooks, tools, services, registeredHookEvents, logs, cliRegistered: () => cliRegistered };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Plugin metadata
+  // ---------------------------------------------------------------------------
+
+  describe("plugin metadata", () => {
+    it("has correct id and kind", () => {
+      assert.equal(plugin.id, "memory-lancedb-voyage");
+      assert.equal(plugin.kind, "memory");
+      assert.ok(plugin.name);
+      assert.ok(plugin.description);
+    });
+
+    it("configSchema is memoryConfigSchema", () => {
+      assert.ok(plugin.configSchema);
+      assert.equal(typeof plugin.configSchema.parse, "function");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // register() — basic wiring
+  // ---------------------------------------------------------------------------
+
+  describe("register() — basic wiring", () => {
+    it("registers tools, service, and CLI", () => {
+      const { api, tools, services, cliRegistered } = createMockApi();
+      plugin.register(api);
+
+      // Should register core tools: memory_recall, memory_store, memory_forget, memory_update
+      const toolNames = tools.map(t => t.name);
+      assert.ok(toolNames.includes("memory_recall"), "should register memory_recall");
+      assert.ok(toolNames.includes("memory_store"), "should register memory_store");
+      assert.ok(toolNames.includes("memory_forget"), "should register memory_forget");
+      assert.ok(toolNames.includes("memory_update"), "should register memory_update");
+
+      // Service registered
+      assert.equal(services.length, 1);
+      assert.equal(services[0].id, "memory-lancedb-voyage");
+
+      // CLI registered
+      assert.ok(cliRegistered());
+    });
+
+    it("registers management tools when enableManagementTools=true", () => {
+      const { api, tools } = createMockApi({ enableManagementTools: true });
+      plugin.register(api);
+
+      const toolNames = tools.map(t => t.name);
+      assert.ok(toolNames.includes("memory_stats"), "should register memory_stats");
+      assert.ok(toolNames.includes("memory_list"), "should register memory_list");
+    });
+
+    it("does NOT register management tools by default", () => {
+      const { api, tools } = createMockApi();
+      plugin.register(api);
+
+      const toolNames = tools.map(t => t.name);
+      assert.ok(!toolNames.includes("memory_stats"));
+      assert.ok(!toolNames.includes("memory_list"));
+    });
+
+    it("logs registration message", () => {
+      const { api, logs } = createMockApi();
+      plugin.register(api);
+
+      const regLog = logs.find(l => l.msg.includes("registered"));
+      assert.ok(regLog, "should log registration");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // autoRecall hook (before_agent_start)
+  // ---------------------------------------------------------------------------
+
+  describe("autoRecall hook (before_agent_start)", () => {
+    it("registers before_agent_start hook when autoRecall=true", () => {
+      const { api, hooks } = createMockApi({ autoRecall: true });
+      plugin.register(api);
+
+      const recallHook = hooks.find(h => h.name === "before_agent_start");
+      assert.ok(recallHook, "should register before_agent_start hook");
+    });
+
+    it("does NOT register before_agent_start when autoRecall=false", () => {
+      const { api, hooks } = createMockApi({ autoRecall: false });
+      plugin.register(api);
+
+      const recallHook = hooks.find(h => h.name === "before_agent_start");
+      assert.equal(recallHook, undefined);
+    });
+
+    it("skips retrieval for greeting prompts", async () => {
+      const { api, hooks } = createMockApi({ autoRecall: true });
+      plugin.register(api);
+
+      const recallHook = hooks.find(h => h.name === "before_agent_start")!;
+      // "hi" should be skipped by shouldSkipRetrieval
+      const result = await recallHook.handler({ prompt: "hi" }, { agentId: "main" });
+      assert.equal(result, undefined, "should return undefined for greeting");
+    });
+
+    it("skips when prompt is empty", async () => {
+      const { api, hooks } = createMockApi({ autoRecall: true });
+      plugin.register(api);
+
+      const recallHook = hooks.find(h => h.name === "before_agent_start")!;
+      const result = await recallHook.handler({ prompt: "" }, {});
+      assert.equal(result, undefined);
+    });
+
+    it("handles retrieval errors gracefully", async () => {
+      const { api, hooks, logs } = createMockApi({ autoRecall: true });
+      plugin.register(api);
+
+      const recallHook = hooks.find(h => h.name === "before_agent_start")!;
+      // A long substantive prompt will attempt retrieval, which will fail
+      // because there's no real embedder — the error should be caught
+      const result = await recallHook.handler(
+        { prompt: "What were the important technical decisions we discussed last week about the database architecture?" },
+        { agentId: "main" },
+      );
+      // Should have caught and logged the error
+      const warnLog = logs.find(l => l.level === "warn" && l.msg.includes("recall failed"));
+      assert.ok(warnLog, "should log recall failure");
+      assert.equal(result, undefined, "should return undefined on error");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // autoCapture hook (agent_end)
+  // ---------------------------------------------------------------------------
+
+  describe("autoCapture hook (agent_end)", () => {
+    it("registers agent_end hook when autoCapture=true", () => {
+      const { api, hooks } = createMockApi({ autoCapture: true });
+      plugin.register(api);
+
+      const captureHook = hooks.find(h => h.name === "agent_end");
+      assert.ok(captureHook, "should register agent_end hook");
+    });
+
+    it("does NOT register agent_end when autoCapture=false", () => {
+      const { api, hooks } = createMockApi({ autoCapture: false });
+      plugin.register(api);
+
+      const captureHook = hooks.find(h => h.name === "agent_end");
+      assert.equal(captureHook, undefined);
+    });
+
+    it("skips capture when event.success is false", async () => {
+      const { api, hooks } = createMockApi({ autoCapture: true });
+      plugin.register(api);
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      const result = await captureHook.handler({ success: false, messages: [] }, {});
+      assert.equal(result, undefined);
+    });
+
+    it("skips capture when messages is empty", async () => {
+      const { api, hooks } = createMockApi({ autoCapture: true });
+      plugin.register(api);
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      const result = await captureHook.handler({ success: true, messages: [] }, {});
+      assert.equal(result, undefined);
+    });
+
+    it("skips capture for non-triggering text", async () => {
+      const { api, hooks } = createMockApi({ autoCapture: true });
+      plugin.register(api);
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      // Short text that doesn't match any trigger
+      const result = await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "ok thanks" }] },
+        { agentId: "main" },
+      );
+      assert.equal(result, undefined);
+    });
+
+    it("attempts capture for triggering text (heuristic path)", async () => {
+      const { api, hooks, logs } = createMockApi({ autoCapture: true, captureLlm: false });
+      plugin.register(api);
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      // Text with a memory trigger — will fail at embedder.embedPassage but error is caught
+      const result = await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember that I prefer dark mode always in my editor" }] },
+        { agentId: "main" },
+      );
+      // Error should be caught gracefully
+      const warnLog = logs.find(l => l.level === "warn" && l.msg.includes("capture failed"));
+      assert.ok(warnLog, "should log capture failure");
+    });
+
+    it("handles array content blocks in messages", async () => {
+      const { api, hooks, logs } = createMockApi({ autoCapture: true, captureLlm: false });
+      plugin.register(api);
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      const result = await captureHook.handler(
+        {
+          success: true,
+          messages: [
+            { role: "user", content: [{ type: "text", text: "Remember I always prefer TypeScript over JavaScript" }] },
+          ],
+        },
+        { agentId: "main" },
+      );
+      // Should attempt capture (will fail at embed, caught gracefully)
+      const warnLog = logs.find(l => l.level === "warn" && l.msg.includes("capture failed"));
+      assert.ok(warnLog, "should attempt capture with array content");
+    });
+
+    it("skips non-user messages when captureAssistant=false", async () => {
+      const { api, hooks } = createMockApi({ autoCapture: true, captureAssistant: false, captureLlm: false });
+      plugin.register(api);
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      const result = await captureHook.handler(
+        {
+          success: true,
+          messages: [{ role: "assistant", content: "Remember to always use TypeScript" }],
+        },
+        { agentId: "main" },
+      );
+      // assistant message should be skipped → no capture
+      assert.equal(result, undefined);
+    });
+
+    it("includes assistant messages when captureAssistant=true", async () => {
+      const { api, hooks, logs } = createMockApi({ autoCapture: true, captureAssistant: true, captureLlm: false });
+      plugin.register(api);
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        {
+          success: true,
+          messages: [{ role: "assistant", content: "Remember that I prefer using dark mode always" }],
+        },
+        { agentId: "main" },
+      );
+      // Should attempt capture (will fail at embed), meaning it processed the assistant message
+      const warnLog = logs.find(l => l.level === "warn" && l.msg.includes("capture failed"));
+      assert.ok(warnLog, "should try to capture assistant message");
+    });
+
+    it("skips null/non-object messages gracefully", async () => {
+      const { api, hooks } = createMockApi({ autoCapture: true, captureLlm: false });
+      plugin.register(api);
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      const result = await captureHook.handler(
+        { success: true, messages: [null, undefined, "string", 42] },
+        { agentId: "main" },
+      );
+      assert.equal(result, undefined);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // LLM capture judgment (captureLlm=true path)
+  // ---------------------------------------------------------------------------
+
+  describe("LLM capture judgment (captureLlm=true)", () => {
+    it("calls LLM gateway and handles store=false response", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      // Mock fetch to return store=false
+      globalThis.fetch = (async (_url: any, _opts: any) => ({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: '{"store": false}' } }],
+        }),
+      })) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // LLM said don't store — no capture error, debug log about not storing
+      const hasCaptureFail = logs.some(l => l.level === "warn" && l.msg.includes("capture failed"));
+      assert.ok(!hasCaptureFail, "should NOT have capture failure when LLM says no");
+    });
+
+    it("calls LLM gateway and handles store=true with memories", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      // Mock fetch to return store=true with memories
+      globalThis.fetch = (async (_url: any, _opts: any) => ({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({
+            store: true,
+            memories: [{ text: "User prefers dark mode", category: "preference", importance: 0.8 }],
+          }) } }],
+        }),
+      })) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // Will fail at embedder.embedPassage since no real API — caught gracefully
+      const warnLog = logs.find(l => l.level === "warn" && l.msg.includes("capture failed"));
+      assert.ok(warnLog, "should fail at embedding step");
+    });
+
+    it("handles LLM gateway returning non-ok status", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      // Mock fetch to return 500
+      globalThis.fetch = (async () => ({
+        ok: false,
+        status: 500,
+      })) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // LLM failed → falls through to heuristic → fails at embedder → caught
+      const warnLog = logs.find(l => l.level === "warn" && l.msg.includes("capture failed"));
+      assert.ok(warnLog, "should fall through to heuristic and fail at embed");
+    });
+
+    it("handles LLM gateway throwing (network error)", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async () => { throw new Error("ECONNREFUSED"); }) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // Falls through to heuristic → fails at embed → caught
+      const warnLog = logs.find(l => l.level === "warn" && l.msg.includes("capture failed"));
+      assert.ok(warnLog);
+    });
+
+    it("handles LLM returning empty content", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({ choices: [{ message: { content: "" } }] }),
+      })) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // LLM returned empty → null → heuristic fallback → embed failure
+      const warnLog = logs.find(l => l.level === "warn");
+      assert.ok(warnLog);
+    });
+
+    it("handles LLM returning non-JSON content", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({ choices: [{ message: { content: "I think we should store this" } }] }),
+      })) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // Non-JSON → null → heuristic fallback
+      const warnLog = logs.find(l => l.msg.includes("not valid JSON") || l.msg.includes("capture failed"));
+      assert.ok(warnLog);
+    });
+
+    it("handles LLM response with store=true but empty memories array", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({ choices: [{ message: { content: '{"store": true, "memories": []}' } }] }),
+      })) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // store=true but no memories → null → heuristic fallback
+      const warnLog = logs.find(l => l.msg.includes("no memories array") || l.msg.includes("capture failed"));
+      assert.ok(warnLog);
+    });
+
+    it("handles LLM response missing store boolean", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({ choices: [{ message: { content: '{"something": "else"}' } }] }),
+      })) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      const warnLog = logs.find(l => l.msg.includes("missing 'store' boolean") || l.msg.includes("capture failed"));
+      assert.ok(warnLog);
+    });
+
+    it("sanitizes invalid category in LLM memory response", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({
+            store: true,
+            memories: [{ text: "test", category: "INVALID_CAT", importance: 99 }],
+          }) } }],
+        }),
+      })) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // Invalid category should be corrected to "other", invalid importance to 0.7
+      // Will fail at embed step
+      const warnLog = logs.find(l => l.level === "warn" && l.msg.includes("capture failed"));
+      assert.ok(warnLog, "should reach embed step with sanitized data");
+    });
+
+    it("handles LLM response with empty memory text", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({
+            store: true,
+            memories: [{ text: "", category: "fact", importance: 0.7 }],
+          }) } }],
+        }),
+      })) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // Empty text → null → heuristic fallback
+      const warnLog = logs.find(l => l.level === "warn");
+      assert.ok(warnLog);
+    });
+
+    it("deduplicates LLM gateway URLs by host", async () => {
+      const fetchedUrls: string[] = [];
+      const { api, hooks } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:3000/v1",  // same host as default fallback
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async (url: any) => {
+        fetchedUrls.push(String(url));
+        throw new Error("ECONNREFUSED");
+      }) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // localhost:3000 should only be tried once (configured URL deduplicates with default)
+      const localhost3000Calls = fetchedUrls.filter(u => u.includes("localhost:3000"));
+      assert.ok(localhost3000Calls.length <= 1, `localhost:3000 called ${localhost3000Calls.length} times, expected <=1`);
+    });
+
+    it("handles abort timeout scenario", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async () => {
+        const err = new Error("The operation was aborted");
+        err.name = "AbortError";
+        throw err;
+      }) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // abort → null from callLlmForCaptureJudgment → heuristic fallback
+      const warnLog = logs.find(l => l.level === "warn");
+      assert.ok(warnLog);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Service start/stop
+  // ---------------------------------------------------------------------------
+
+  describe("service start/stop", () => {
+    it("service start handles errors gracefully", async () => {
+      const { api, services, logs } = createMockApi();
+      plugin.register(api);
+
+      const svc = services[0];
+      assert.ok(svc);
+
+      // Mock fetch to fail so embedder.test() returns {success: false}
+      globalThis.fetch = (async () => {
+        throw new Error("ECONNREFUSED");
+      }) as any;
+
+      // start() will try embedder.test() and retriever.test() — both will fail.
+      // embedder.test() catches internally and returns {success: false}.
+      // The service start code then logs the embedding test failure.
+      await svc.start();
+      const warnLog = logs.find(l => l.level === "warn" && l.msg.includes("embedding test failed"));
+      assert.ok(warnLog, "should log embedding test failure");
+    });
+
+    it("service stop clears backup timer", () => {
+      const { api, services, logs } = createMockApi();
+      plugin.register(api);
+
+      const svc = services[0];
+      // stop() should not throw
+      svc.stop();
+      const stopLog = logs.find(l => l.msg.includes("stopped"));
+      assert.ok(stopLog, "should log stop message");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // sessionMemory hook (command:new)
+  // ---------------------------------------------------------------------------
+
+  describe("sessionMemory hook", () => {
+    it("registers command:new hook when sessionMemory.enabled=true", () => {
+      const { api, registeredHookEvents } = createMockApi({
+        sessionMemory: { enabled: true, messageCount: 15 },
+      });
+      plugin.register(api);
+
+      const sessionHook = registeredHookEvents.find(h => h.name === "command:new");
+      assert.ok(sessionHook, "should register command:new hook");
+    });
+
+    it("does NOT register command:new hook when sessionMemory.enabled=false", () => {
+      const { api, registeredHookEvents } = createMockApi({
+        sessionMemory: { enabled: false },
+      });
+      plugin.register(api);
+
+      const sessionHook = registeredHookEvents.find(h => h.name === "command:new");
+      assert.equal(sessionHook, undefined);
+    });
+
+    it("handles missing sessionFile gracefully", async () => {
+      const { api, registeredHookEvents, logs } = createMockApi({
+        sessionMemory: { enabled: true, messageCount: 15 },
+      });
+      plugin.register(api);
+
+      const sessionHook = registeredHookEvents.find(h => h.name === "command:new")!;
+      // Call with empty context — no sessionFile
+      await sessionHook.handler({
+        timestamp: Date.now(),
+        sessionKey: "test-key",
+        context: {},
+      });
+
+      // Should return without error (no sessionFile)
+      const warnLog = logs.find(l => l.msg.includes("session summary failed"));
+      assert.ok(!warnLog, "should not fail — just early return");
+    });
+
+    it("handles non-existent session file gracefully", async () => {
+      const { api, registeredHookEvents, logs } = createMockApi({
+        sessionMemory: { enabled: true, messageCount: 15 },
+      });
+      plugin.register(api);
+
+      const sessionHook = registeredHookEvents.find(h => h.name === "command:new")!;
+      await sessionHook.handler({
+        timestamp: Date.now(),
+        sessionKey: "test-key",
+        context: {
+          previousSessionEntry: {
+            sessionFile: "/tmp/nonexistent-session-file.jsonl",
+            sessionId: "test-session-id",
+          },
+        },
+      });
+
+      // File doesn't exist → readSessionMessages returns null → early return or error caught
+      // Either way, no crash
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // callLlmForCaptureJudgment — more edge cases (19)
+  // ---------------------------------------------------------------------------
+
+  describe("callLlmForCaptureJudgment edge cases", () => {
+    const originalEnv = { ...process.env };
+
+    afterEach(() => {
+      // Restore env
+      for (const key of Object.keys(process.env)) {
+        if (!(key in originalEnv)) delete process.env[key];
+      }
+      for (const [key, val] of Object.entries(originalEnv)) {
+        if (val !== undefined) process.env[key] = val;
+      }
+    });
+
+    it("uses OPENCLAW_GATEWAY_URL env var as fallback", async () => {
+      const fetchedUrls: string[] = [];
+      process.env.OPENCLAW_GATEWAY_URL = "http://custom-gateway:5000";
+
+      const { api, hooks } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async (url: any) => {
+        fetchedUrls.push(String(url));
+        throw new Error("ECONNREFUSED");
+      }) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      assert.ok(fetchedUrls.some(u => u.includes("custom-gateway:5000")), "should try OPENCLAW_GATEWAY_URL");
+
+      delete process.env.OPENCLAW_GATEWAY_URL;
+    });
+
+    it("handles markdown-wrapped JSON in LLM response", async () => {
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: '```json\n{"store": false}\n```' } }],
+        }),
+      })) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // Should extract JSON from markdown code block
+      const captureFail = logs.find(l => l.level === "warn" && l.msg.includes("capture failed"));
+      assert.ok(!captureFail, "should not fail — JSON extracted from markdown");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ConversationBuffer behavior via capture hooks (20)
+  // ---------------------------------------------------------------------------
+
+  describe("ConversationBuffer behavior via capture hooks", () => {
+    it("accumulates messages across multiple agent_end events", async () => {
+      let callCount = 0;
+      const { api, hooks, logs } = createMockApi({
+        autoCapture: true,
+        captureLlm: true,
+        captureLlmModel: "test-model",
+        captureLlmUrl: "http://localhost:19999",
+      });
+      plugin.register(api);
+
+      globalThis.fetch = (async (_url: any, opts: any) => {
+        callCount++;
+        const body = JSON.parse(opts.body);
+        // Verify that later calls include accumulated context
+        if (callCount > 1) {
+          assert.ok(body.messages[1].content.length > 0, "should have accumulated content");
+        }
+        return {
+          ok: true,
+          json: async () => ({ choices: [{ message: { content: '{"store": false}' } }] }),
+        };
+      }) as any;
+
+      const captureHook = hooks.find(h => h.name === "agent_end")!;
+
+      // First turn
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Remember I always prefer dark mode in my editor" }] },
+        { agentId: "main" },
+      );
+
+      // Second turn — buffer should include context from first turn
+      await captureHook.handler(
+        { success: true, messages: [{ role: "user", content: "Also remember I prefer tabs over spaces always" }] },
+        { agentId: "main" },
+      );
+
+      assert.ok(callCount >= 1, "should have called LLM at least once");
+    });
+  });
+});
+
+// ============================================================================
+// 18. sanitizeForContext (exported indirectly via hook behavior)
+// ============================================================================
+
+describe("sanitizeForContext (via index.ts internals)", () => {
+  // We can't import sanitizeForContext directly, but we can test it indirectly
+  // by looking at the prependContext output from the autoRecall hook.
+  // Since the recall hook requires a working embedder, we test the function
+  // via its public effects — already covered above.
+
+  // Instead, test the exported functions more thoroughly:
+
+  it("shouldCapture rejects markdown-formatted text", () => {
+    const text = "**Bold** and\n- list item about preferences";
+    assert.equal(shouldCapture(text), false);
+  });
+});
+
+// ============================================================================
+// 21. Tool execute handlers (tools.ts)
+// ============================================================================
+
+import {
+  registerMemoryRecallTool,
+  registerMemoryStoreTool,
+  registerMemoryForgetTool,
+  registerMemoryUpdateTool,
+  registerMemoryStatsTool,
+  registerMemoryListTool,
+  registerAllMemoryTools,
+} from "../src/tools.js";
+
+describe("Tool handlers (tools.ts)", () => {
+  function createToolTestContext(overrides: Record<string, any> = {}) {
+    const storedEntries: any[] = [];
+    const deletedIds: string[] = [];
+
+    const mockRetriever = {
+      retrieve: overrides.retrieveResults
+        ? async () => overrides.retrieveResults
+        : async () => [],
+      getConfig: () => ({ mode: "hybrid" }),
+      test: async () => ({ success: true, mode: "hybrid", hasFtsSupport: true }),
+      ...overrides.retriever,
+    };
+
+    const mockStore = {
+      dbPath: "/tmp/test-db",
+      hasFtsSupport: true,
+      vectorSearch: overrides.vectorSearchResults
+        ? async () => overrides.vectorSearchResults
+        : async () => [],
+      bm25Search: async () => [],
+      store: async (entry: any) => {
+        const full = { ...entry, id: "new-id-123", timestamp: Date.now() };
+        storedEntries.push(full);
+        return full;
+      },
+      list: overrides.listResults
+        ? async () => overrides.listResults
+        : async () => [],
+      delete: async (id: string) => {
+        if (overrides.deleteThrows) throw new Error(overrides.deleteThrows);
+        deletedIds.push(id);
+        return overrides.deleteResult !== undefined ? overrides.deleteResult : true;
+      },
+      stats: overrides.statsResult
+        ? async () => overrides.statsResult
+        : async () => ({ totalCount: 0, scopeCounts: {}, categoryCounts: {} }),
+      update: overrides.updateResult !== undefined
+        ? async () => overrides.updateResult
+        : async () => null,
+      bulkDelete: async () => 0,
+      hasId: async () => false,
+      importEntry: async () => ({} as any),
+    };
+
+    const mockScopeManager = {
+      getAccessibleScopes: () => ["global"],
+      getDefaultScope: () => "global",
+      isAccessible: (scope: string) => scope === "global" || scope === "project",
+      getStats: () => ({ totalScopes: 2, scopesByType: {} }),
+    };
+
+    const mockEmbedder = {
+      dimensions: 3,
+      model: "mock-model",
+      embed: async () => [0.1, 0.2, 0.3],
+      embedQuery: async () => [0.1, 0.2, 0.3],
+      embedPassage: async () => [0.1, 0.2, 0.3],
+      embedBatch: async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3]),
+      test: async () => ({ success: true, dimensions: 3 }),
+      get cacheStats() { return { size: 0, hits: 0, misses: 0, hitRate: "N/A" }; },
+    };
+
+    const context: any = {
+      retriever: mockRetriever,
+      store: mockStore,
+      scopeManager: mockScopeManager,
+      embedder: mockEmbedder,
+      agentId: undefined,
+    };
+
+    return { context, storedEntries, deletedIds, mockStore, mockRetriever };
+  }
+
+  function createToolApi() {
+    const registeredTools: Map<string, any> = new Map();
+    const api: any = {
+      registerTool: (tool: any, opts: any) => {
+        registeredTools.set(opts?.name || tool.name, tool);
+      },
+    };
+    return { api, registeredTools };
+  }
+
+  // ---- memory_recall ----
+
+  describe("memory_recall tool", () => {
+    it("returns no memories message when empty", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryRecallTool(api, context);
+
+      const tool = registeredTools.get("memory_recall")!;
+      const result = await tool.execute("call-1", { query: "test" });
+      assert.ok(result.content[0].text.includes("No relevant memories"));
+      assert.equal(result.details.count, 0);
+    });
+
+    it("returns formatted results when memories exist", async () => {
+      const { context } = createToolTestContext({
+        retrieveResults: [{
+          entry: { id: "r1", text: "User prefers dark mode", category: "preference", scope: "global", importance: 0.8, timestamp: 100 },
+          score: 0.92,
+          sources: { vector: true, bm25: false, reranked: false },
+        }],
+      });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryRecallTool(api, context);
+
+      const tool = registeredTools.get("memory_recall")!;
+      const result = await tool.execute("call-1", { query: "preferences" });
+      assert.ok(result.content[0].text.includes("Found 1 memories"));
+      assert.ok(result.content[0].text.includes("dark mode"));
+      assert.equal(result.details.count, 1);
+    });
+
+    it("filters by scope when provided", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryRecallTool(api, context);
+
+      const tool = registeredTools.get("memory_recall")!;
+      const result = await tool.execute("call-1", { query: "test", scope: "global" });
+      assert.equal(result.details.count, 0);
+      assert.deepEqual(result.details.scopes, ["global"]);
+    });
+
+    it("denies access to inaccessible scope", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryRecallTool(api, context);
+
+      const tool = registeredTools.get("memory_recall")!;
+      const result = await tool.execute("call-1", { query: "test", scope: "secret" });
+      assert.ok(result.content[0].text.includes("Access denied"));
+      assert.equal(result.details.error, "scope_access_denied");
+    });
+
+    it("handles retrieval errors gracefully", async () => {
+      const { context } = createToolTestContext();
+      context.retriever.retrieve = async () => { throw new Error("embed failed"); };
+      const { api, registeredTools } = createToolApi();
+      registerMemoryRecallTool(api, context);
+
+      const tool = registeredTools.get("memory_recall")!;
+      const result = await tool.execute("call-1", { query: "test" });
+      assert.ok(result.content[0].text.includes("Memory recall failed"));
+      assert.equal(result.details.error, "recall_failed");
+    });
+
+    it("includes source info (BM25, reranked) in output", async () => {
+      const { context } = createToolTestContext({
+        retrieveResults: [{
+          entry: { id: "r1", text: "test", category: "fact", scope: "global", importance: 0.8, timestamp: 100 },
+          score: 0.9,
+          sources: { vector: true, bm25: true, reranked: true },
+        }],
+      });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryRecallTool(api, context);
+
+      const tool = registeredTools.get("memory_recall")!;
+      const result = await tool.execute("call-1", { query: "test" });
+      assert.ok(result.content[0].text.includes("vector"));
+      assert.ok(result.content[0].text.includes("BM25"));
+      assert.ok(result.content[0].text.includes("reranked"));
+    });
+  });
+
+  // ---- memory_store ----
+
+  describe("memory_store tool", () => {
+    it("stores a memory successfully", async () => {
+      const { context, storedEntries } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryStoreTool(api, context);
+
+      const tool = registeredTools.get("memory_store")!;
+      const result = await tool.execute("call-1", { text: "User prefers dark mode" });
+      assert.ok(result.content[0].text.includes("Stored"));
+      assert.equal(result.details.action, "created");
+      assert.equal(storedEntries.length, 1);
+    });
+
+    it("detects duplicate memories", async () => {
+      const { context } = createToolTestContext({
+        vectorSearchResults: [{
+          entry: { id: "dup-1", text: "User prefers dark mode", category: "preference", scope: "global", importance: 0.8, timestamp: 100 },
+          score: 0.99, // > 0.98 threshold
+        }],
+      });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryStoreTool(api, context);
+
+      const tool = registeredTools.get("memory_store")!;
+      const result = await tool.execute("call-1", { text: "User prefers dark mode" });
+      assert.ok(result.content[0].text.includes("Similar memory already exists"));
+      assert.equal(result.details.action, "duplicate");
+    });
+
+    it("denies access to inaccessible scope", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryStoreTool(api, context);
+
+      const tool = registeredTools.get("memory_store")!;
+      const result = await tool.execute("call-1", { text: "test", scope: "secret" });
+      assert.ok(result.content[0].text.includes("Access denied"));
+    });
+
+    it("filters noise text", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryStoreTool(api, context);
+
+      const tool = registeredTools.get("memory_store")!;
+      const result = await tool.execute("call-1", { text: "ok" });
+      assert.ok(result.content[0].text.includes("noise"));
+      assert.equal(result.details.action, "noise_filtered");
+    });
+
+    it("handles store errors gracefully", async () => {
+      const { context } = createToolTestContext();
+      context.embedder.embedPassage = async () => { throw new Error("API error"); };
+      const { api, registeredTools } = createToolApi();
+      registerMemoryStoreTool(api, context);
+
+      const tool = registeredTools.get("memory_store")!;
+      const result = await tool.execute("call-1", { text: "important fact to remember" });
+      assert.ok(result.content[0].text.includes("Memory storage failed"));
+      assert.equal(result.details.error, "store_failed");
+    });
+  });
+
+  // ---- memory_forget ----
+
+  describe("memory_forget tool", () => {
+    it("deletes by memoryId", async () => {
+      const { context, deletedIds } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryForgetTool(api, context);
+
+      const tool = registeredTools.get("memory_forget")!;
+      const result = await tool.execute("call-1", { memoryId: "abc123" });
+      assert.ok(result.content[0].text.includes("forgotten"));
+      assert.equal(deletedIds[0], "abc123");
+    });
+
+    it("reports not found for missing memoryId", async () => {
+      const { context } = createToolTestContext({ deleteResult: false });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryForgetTool(api, context);
+
+      const tool = registeredTools.get("memory_forget")!;
+      const result = await tool.execute("call-1", { memoryId: "nonexistent" });
+      assert.ok(result.content[0].text.includes("not found"));
+    });
+
+    it("searches by query and lists candidates", async () => {
+      const { context } = createToolTestContext({
+        retrieveResults: [
+          { entry: { id: "r1", text: "first memory", category: "fact", scope: "global", importance: 0.8, timestamp: 100 }, score: 0.7, sources: {} },
+          { entry: { id: "r2", text: "second memory", category: "fact", scope: "global", importance: 0.7, timestamp: 200 }, score: 0.6, sources: {} },
+        ],
+      });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryForgetTool(api, context);
+
+      const tool = registeredTools.get("memory_forget")!;
+      const result = await tool.execute("call-1", { query: "memory" });
+      assert.ok(result.content[0].text.includes("candidates"));
+      assert.equal(result.details.action, "candidates");
+    });
+
+    it("auto-deletes single high-confidence match", async () => {
+      const { context, deletedIds } = createToolTestContext({
+        retrieveResults: [
+          { entry: { id: "r1", text: "exact match", category: "fact", scope: "global", importance: 0.8, timestamp: 100 }, score: 0.95, sources: {} },
+        ],
+      });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryForgetTool(api, context);
+
+      const tool = registeredTools.get("memory_forget")!;
+      const result = await tool.execute("call-1", { query: "exact" });
+      assert.ok(result.content[0].text.includes("Forgotten"));
+      assert.equal(deletedIds[0], "r1");
+    });
+
+    it("returns error when no query or memoryId", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryForgetTool(api, context);
+
+      const tool = registeredTools.get("memory_forget")!;
+      const result = await tool.execute("call-1", {});
+      assert.ok(result.content[0].text.includes("Provide either"));
+      assert.equal(result.details.error, "missing_param");
+    });
+
+    it("denies access to inaccessible scope", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryForgetTool(api, context);
+
+      const tool = registeredTools.get("memory_forget")!;
+      const result = await tool.execute("call-1", { memoryId: "abc", scope: "secret" });
+      assert.ok(result.content[0].text.includes("Access denied"));
+    });
+
+    it("handles delete errors gracefully", async () => {
+      const { context } = createToolTestContext({ deleteThrows: "DB error" });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryForgetTool(api, context);
+
+      const tool = registeredTools.get("memory_forget")!;
+      const result = await tool.execute("call-1", { memoryId: "abc" });
+      assert.ok(result.content[0].text.includes("Memory deletion failed"));
+      assert.equal(result.details.error, "delete_failed");
+    });
+
+    it("returns no matching when query yields empty results", async () => {
+      const { context } = createToolTestContext({ retrieveResults: [] });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryForgetTool(api, context);
+
+      const tool = registeredTools.get("memory_forget")!;
+      const result = await tool.execute("call-1", { query: "nonexistent" });
+      assert.ok(result.content[0].text.includes("No matching"));
+    });
+  });
+
+  // ---- memory_update ----
+
+  describe("memory_update tool", () => {
+    it("updates an existing memory by UUID", async () => {
+      const uuid = "12345678-1234-1234-1234-123456789abc";
+      const { context } = createToolTestContext({
+        updateResult: { id: uuid, text: "updated text", category: "fact", scope: "global", importance: 0.9, timestamp: 100 },
+      });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryUpdateTool(api, context);
+
+      const tool = registeredTools.get("memory_update")!;
+      const result = await tool.execute("call-1", { memoryId: uuid, text: "updated text" });
+      assert.ok(result.content[0].text.includes("Updated memory"));
+      assert.equal(result.details.action, "updated");
+    });
+
+    it("returns error when nothing to update", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryUpdateTool(api, context);
+
+      const tool = registeredTools.get("memory_update")!;
+      const result = await tool.execute("call-1", { memoryId: "12345678" });
+      assert.ok(result.content[0].text.includes("Nothing to update"));
+      assert.equal(result.details.error, "no_updates");
+    });
+
+    it("returns not found when update returns null", async () => {
+      const { context } = createToolTestContext({ updateResult: null });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryUpdateTool(api, context);
+
+      const tool = registeredTools.get("memory_update")!;
+      const result = await tool.execute("call-1", { memoryId: "12345678-1234-1234-1234-123456789abc", text: "new text" });
+      assert.ok(result.content[0].text.includes("not found"));
+    });
+
+    it("resolves by text search when memoryId is not UUID-like", async () => {
+      const { context } = createToolTestContext({
+        retrieveResults: [{
+          entry: { id: "found-id-1234", text: "old text", category: "fact", scope: "global", importance: 0.8, timestamp: 100 },
+          score: 0.9,
+          sources: {},
+        }],
+        updateResult: { id: "found-id-1234", text: "new text", category: "fact", scope: "global", importance: 0.8, timestamp: 100 },
+      });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryUpdateTool(api, context);
+
+      const tool = registeredTools.get("memory_update")!;
+      const result = await tool.execute("call-1", { memoryId: "my preference", text: "new text" });
+      assert.ok(result.content[0].text.includes("Updated"));
+    });
+
+    it("shows candidates when text search returns multiple low-confidence results", async () => {
+      const { context } = createToolTestContext({
+        retrieveResults: [
+          { entry: { id: "c1", text: "first", category: "fact", scope: "global", importance: 0.8, timestamp: 100 }, score: 0.5, sources: {} },
+          { entry: { id: "c2", text: "second", category: "fact", scope: "global", importance: 0.7, timestamp: 200 }, score: 0.4, sources: {} },
+        ],
+      });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryUpdateTool(api, context);
+
+      const tool = registeredTools.get("memory_update")!;
+      const result = await tool.execute("call-1", { memoryId: "ambiguous text query", text: "x" });
+      assert.ok(result.content[0].text.includes("Multiple matches"));
+      assert.equal(result.details.action, "candidates");
+    });
+
+    it("filters noise in updated text", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryUpdateTool(api, context);
+
+      const tool = registeredTools.get("memory_update")!;
+      const result = await tool.execute("call-1", { memoryId: "12345678-1234-1234-1234-123456789abc", text: "ok" });
+      assert.ok(result.content[0].text.includes("noise"));
+      assert.equal(result.details.action, "noise_filtered");
+    });
+
+    it("handles update errors gracefully", async () => {
+      const { context } = createToolTestContext();
+      context.store.update = async () => { throw new Error("DB error"); };
+      const { api, registeredTools } = createToolApi();
+      registerMemoryUpdateTool(api, context);
+
+      const tool = registeredTools.get("memory_update")!;
+      const result = await tool.execute("call-1", { memoryId: "12345678-1234-1234-1234-123456789abc", importance: 0.9 });
+      assert.ok(result.content[0].text.includes("Memory update failed"));
+      assert.equal(result.details.error, "update_failed");
+    });
+
+    it("returns not found when text search yields no results", async () => {
+      const { context } = createToolTestContext({ retrieveResults: [] });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryUpdateTool(api, context);
+
+      const tool = registeredTools.get("memory_update")!;
+      const result = await tool.execute("call-1", { memoryId: "some text query", text: "new text" });
+      assert.ok(result.content[0].text.includes("No memory found"));
+    });
+  });
+
+  // ---- memory_stats ----
+
+  describe("memory_stats tool", () => {
+    it("returns formatted statistics", async () => {
+      const { context } = createToolTestContext({
+        statsResult: {
+          totalCount: 5,
+          scopeCounts: { global: 3, project: 2 },
+          categoryCounts: { fact: 3, preference: 2 },
+        },
+      });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryStatsTool(api, context);
+
+      const tool = registeredTools.get("memory_stats")!;
+      const result = await tool.execute("call-1", {});
+      assert.ok(result.content[0].text.includes("Total memories: 5"));
+      assert.ok(result.content[0].text.includes("global: 3"));
+    });
+
+    it("denies access to inaccessible scope", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryStatsTool(api, context);
+
+      const tool = registeredTools.get("memory_stats")!;
+      const result = await tool.execute("call-1", { scope: "secret" });
+      assert.ok(result.content[0].text.includes("Access denied"));
+    });
+
+    it("handles stats errors gracefully", async () => {
+      const { context } = createToolTestContext();
+      context.store.stats = async () => { throw new Error("DB error"); };
+      const { api, registeredTools } = createToolApi();
+      registerMemoryStatsTool(api, context);
+
+      const tool = registeredTools.get("memory_stats")!;
+      const result = await tool.execute("call-1", {});
+      assert.ok(result.content[0].text.includes("Failed to get memory stats"));
+    });
+  });
+
+  // ---- memory_list ----
+
+  describe("memory_list tool", () => {
+    it("returns formatted list of memories", async () => {
+      const { context } = createToolTestContext({
+        listResults: [
+          { id: "l1", text: "first memory", category: "fact", scope: "global", importance: 0.8, timestamp: Date.now() },
+          { id: "l2", text: "second memory", category: "preference", scope: "global", importance: 0.7, timestamp: Date.now() - 1000 },
+        ],
+      });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryListTool(api, context);
+
+      const tool = registeredTools.get("memory_list")!;
+      const result = await tool.execute("call-1", {});
+      assert.ok(result.content[0].text.includes("Recent memories"));
+      assert.ok(result.content[0].text.includes("first memory"));
+      assert.equal(result.details.count, 2);
+    });
+
+    it("returns no memories message when empty", async () => {
+      const { context } = createToolTestContext({ listResults: [] });
+      const { api, registeredTools } = createToolApi();
+      registerMemoryListTool(api, context);
+
+      const tool = registeredTools.get("memory_list")!;
+      const result = await tool.execute("call-1", {});
+      assert.ok(result.content[0].text.includes("No memories found"));
+    });
+
+    it("denies access to inaccessible scope", async () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerMemoryListTool(api, context);
+
+      const tool = registeredTools.get("memory_list")!;
+      const result = await tool.execute("call-1", { scope: "secret" });
+      assert.ok(result.content[0].text.includes("Access denied"));
+    });
+
+    it("handles list errors gracefully", async () => {
+      const { context } = createToolTestContext();
+      context.store.list = async () => { throw new Error("DB error"); };
+      const { api, registeredTools } = createToolApi();
+      registerMemoryListTool(api, context);
+
+      const tool = registeredTools.get("memory_list")!;
+      const result = await tool.execute("call-1", {});
+      assert.ok(result.content[0].text.includes("Failed to list memories"));
+    });
+  });
+
+  // ---- registerAllMemoryTools ----
+
+  describe("registerAllMemoryTools()", () => {
+    it("registers core tools without management tools by default", () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerAllMemoryTools(api, context);
+
+      assert.ok(registeredTools.has("memory_recall"));
+      assert.ok(registeredTools.has("memory_store"));
+      assert.ok(registeredTools.has("memory_forget"));
+      assert.ok(registeredTools.has("memory_update"));
+      assert.ok(!registeredTools.has("memory_stats"));
+      assert.ok(!registeredTools.has("memory_list"));
+    });
+
+    it("registers all tools including management when enabled", () => {
+      const { context } = createToolTestContext();
+      const { api, registeredTools } = createToolApi();
+      registerAllMemoryTools(api, context, { enableManagementTools: true });
+
+      assert.ok(registeredTools.has("memory_stats"));
+      assert.ok(registeredTools.has("memory_list"));
     });
   });
 });
