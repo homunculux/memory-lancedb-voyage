@@ -121,7 +121,11 @@ async function callLlmForCaptureJudgment(
     if (!url) return;
     const normalized = normalizeBaseUrl(url);
     const host = getUrlHost(normalized);
-    if (host && !seenHosts.has(host)) {
+    if (!host) {
+      console.warn(`[Vidya] Unable to parse URL: ${url}`);
+      return;
+    }
+    if (!seenHosts.has(host)) {
       seenHosts.add(host);
       gatewayUrls.push(normalized);
     }

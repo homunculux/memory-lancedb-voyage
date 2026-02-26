@@ -825,6 +825,11 @@ describe("LLM Capture Config", () => {
     assert.equal(config.captureLlmUrl, "https://api.openai.com");
   });
 
+  it("captureLlmUrl strips trailing /v1/ (with slash) to prevent double path", () => {
+    const config = memoryConfigSchema.parse({ embedding: { apiKey: "k" }, captureLlmUrl: "https://api.openai.com/v1/" });
+    assert.equal(config.captureLlmUrl, "https://api.openai.com");
+  });
+
   it("captureLlmUrl strips trailing slash", () => {
     const config = memoryConfigSchema.parse({ embedding: { apiKey: "k" }, captureLlmUrl: "http://localhost:3000/" });
     assert.equal(config.captureLlmUrl, "http://localhost:3000");

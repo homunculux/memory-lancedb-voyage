@@ -7,7 +7,7 @@
 export function normalizeBaseUrl(url: string): string {
   let u = url.trim().replace(/\/+$/, "");
   if (u.toLowerCase().endsWith("/v1")) u = u.slice(0, -3);
-  return u.replace(/\/+$/, "");
+  return u;
 }
 
 /**
