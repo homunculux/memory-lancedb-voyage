@@ -1071,8 +1071,8 @@ describe("EmbeddingCache", () => {
     // Use a very short TTL and wait for it to expire
     const cache = new EmbeddingCache(10, 1 / 60_000); // ~1ms TTL
     cache.set("hello", "doc", [1, 2, 3]);
-    // Wait 5ms for TTL to expire
-    await new Promise(resolve => setTimeout(resolve, 5));
+    // Wait 20ms for TTL to expire (generous margin for slow CI)
+    await new Promise(resolve => setTimeout(resolve, 20));
     const result = cache.get("hello", "doc");
     assert.equal(result, undefined);
     assert.equal(cache.misses, 1);
@@ -1830,16 +1830,24 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
     });
 
     const results = await retriever.retrieve({ query: "test", limit: 5 });
-    if (results.length >= 2) {
-      assert.ok(results[0].entry.id === "recent" || results[0].score >= results[1].score);
-    }
+    assert.ok(results.length >= 2);
+    const recentResult = results.find(r => r.entry.id === "recent");
+    const oldResult = results.find(r => r.entry.id === "old");
+    assert.ok(recentResult, "Expected a result for the recent entry");
+    assert.ok(oldResult, "Expected a result for the old entry");
+    assert.ok(
+      recentResult!.score > oldResult!.score,
+      "Expected recency boost to give the recent entry a higher score than the old entry",
+    );
   });
 
   it("MMR diversity deduplicates similar entries", async () => {
     const vec = Array(1024).fill(0.5);
+    // Create a vector that points in a genuinely different direction (not just different magnitude)
+    const uniqueVec = Array.from({ length: 1024 }, (_, i) => (i % 2 === 0 ? 0.9 : -0.3));
     const entry1 = makeEntry({ id: "dup-1", text: "duplicate content A", vector: vec, importance: 0.8 });
     const entry2 = makeEntry({ id: "dup-2", text: "duplicate content B", vector: vec, importance: 0.8 });
-    const entry3 = makeEntry({ id: "unique", text: "unique content here", vector: Array(1024).fill(0.9), importance: 0.8 });
+    const entry3 = makeEntry({ id: "unique", text: "unique content here", vector: uniqueVec, importance: 0.8 });
     const store = createMockStore([
       makeResult(entry1, 0.9),
       makeResult(entry2, 0.89),
@@ -1855,7 +1863,25 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
     });
 
     const results = await retriever.retrieve({ query: "test", limit: 5 });
-    assert.ok(results.length >= 2);
+    // Ensure we get all three results back
+    assert.ok(results.length >= 3);
+
+    // MMR diversity defers similar entries — the unique entry should be
+    // promoted above the second duplicate because dup-2 is too similar to dup-1.
+    const ids = results.map((r) => r.entry.id);
+    const uniqueIdx = ids.indexOf("unique");
+    const dup1Idx = ids.indexOf("dup-1");
+    const dup2Idx = ids.indexOf("dup-2");
+
+    assert.ok(uniqueIdx !== -1, "Expected unique entry in results");
+    assert.ok(dup1Idx !== -1, "Expected dup-1 entry in results");
+    assert.ok(dup2Idx !== -1, "Expected dup-2 entry in results");
+
+    // The unique entry should rank above the deferred duplicate
+    assert.ok(
+      uniqueIdx < dup2Idx,
+      "MMR diversity should promote the unique entry above the second duplicate",
+    );
   });
 
   it("hardMinScore filters out low-scoring results", async () => {
@@ -1871,7 +1897,7 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
     });
 
     const results = await retriever.retrieve({ query: "test", limit: 5 });
-    assert.ok(Array.isArray(results));
+    assert.strictEqual(results.length, 0);
   });
 
   it("noise filter removes noisy results", async () => {
@@ -2072,9 +2098,11 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
       minScore: 0.1,
     }, "voyage-test-key");
 
-    // Should not throw, falls back to cosine
+    // Should not throw, falls back to cosine similarity
     const results = await retriever.retrieve({ query: "test", limit: 5 });
     assert.ok(Array.isArray(results));
+    assert.ok(results.length > 0, "Fallback should still return results");
+    assert.ok(results[0].score > 0, "Fallback results should have non-zero scores");
   });
 
   it("cross-encoder rerank handles invalid response shape", async () => {
@@ -2102,6 +2130,8 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
 
     const results = await retriever.retrieve({ query: "test", limit: 5 });
     assert.ok(Array.isArray(results));
+    assert.ok(results.length > 0, "Fallback should still return results on invalid rerank response");
+    assert.ok(results[0].score > 0, "Fallback results should have non-zero scores");
   });
 
   it("cross-encoder rerank handles fetch exception", async () => {
@@ -2123,6 +2153,8 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
 
     const results = await retriever.retrieve({ query: "test", limit: 5 });
     assert.ok(Array.isArray(results));
+    assert.ok(results.length > 0, "Fallback should still return results on fetch exception");
+    assert.ok(results[0].score > 0, "Fallback results should have non-zero scores");
   });
 
   it("falls back to vector-only when store has no FTS support", async () => {
@@ -2143,7 +2175,13 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
   });
 
   it("limit is clamped between 1 and 20", async () => {
+    const vectorSearchCalls: number[] = [];
     const store = createMockStore();
+    const origVectorSearch = store.vectorSearch;
+    store.vectorSearch = async (vec: any, limit: number, ...rest: any[]) => {
+      vectorSearchCalls.push(limit);
+      return origVectorSearch(vec, limit, ...rest);
+    };
     const embedder = createMockEmbedder();
     const retriever = createRetriever(store, embedder as any, {
       ...DEFAULT_RETRIEVAL_CONFIG,
@@ -2154,5 +2192,9 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
     await retriever.retrieve({ query: "test", limit: 0 });
     await retriever.retrieve({ query: "test", limit: 100 });
     await retriever.retrieve({ query: "test", limit: -5 });
+
+    assert.strictEqual(vectorSearchCalls[0], 1, "limit 0 should be clamped to 1");
+    assert.strictEqual(vectorSearchCalls[1], 20, "limit 100 should be clamped to 20");
+    assert.strictEqual(vectorSearchCalls[2], 1, "limit -5 should be clamped to 1");
   });
 });
