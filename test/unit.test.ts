@@ -1026,6 +1026,9 @@ describe("getUrlHost()", () => {
 
   it("extracts host from URL without protocol", () => {
     assert.equal(getUrlHost("example.com"), "example.com");
+  });
+
+  it("returns empty string when port is interpreted as protocol", () => {
     // "localhost:3000" is parsed as scheme "localhost:" by URL constructor (doesn't throw),
     // so it returns empty string host (URL treats "localhost" as the protocol)
     assert.equal(getUrlHost("localhost:3000"), "");
@@ -2017,6 +2020,7 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
     });
 
     const results = await retriever.retrieve({ query: "test", limit: 5, category: "preference" });
+    assert.ok(results.length > 0, "Expected at least one result for category 'preference'");
     for (const r of results) {
       assert.equal(r.entry.category, "preference");
     }
@@ -2036,7 +2040,7 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
     }, undefined); // no API key → falls back to cosine
 
     const results = await retriever.retrieve({ query: "test", limit: 5 });
-    assert.ok(results.length >= 0);
+    assert.ok(results.length > 0);
   });
 
   it("cross-encoder rerank with mocked Voyage API (hybrid mode)", async () => {
