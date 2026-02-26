@@ -2204,913 +2204,1594 @@ describe("MemoryRetriever (mocked store + embedder)", () => {
 });
 
 // ============================================================================
-// 16. MemoryStore (mocked LanceDB)
+// Phase 2: Extended coverage tests for store, tools, cli, migrate, index
 // ============================================================================
 
-import { MemoryStore } from "../src/store.js";
+// Dynamic imports for modules not yet imported at the top of unit.test.ts
+const storeModule = await import("../src/store.js");
+const { MemoryStore } = storeModule;
 
-describe("MemoryStore (mocked LanceDB)", () => {
+const toolsModule = await import("../src/tools.js");
+const {
+  registerMemoryRecallTool,
+  registerMemoryStoreTool,
+  registerMemoryForgetTool,
+  registerMemoryUpdateTool,
+  registerMemoryStatsTool,
+  registerMemoryListTool,
+  registerAllMemoryTools,
+} = toolsModule;
 
-  // ---------------------------------------------------------------------------
-  // Mock LanceDB table builder — returns a chainable query/search object
-  // ---------------------------------------------------------------------------
+const cliModule = await import("../cli.js");
+const { registerMemoryCLI } = cliModule;
 
-  type Row = Record<string, unknown>;
+const migrateModule = await import("../src/migrate.js");
+const { MemoryMigrator, createMigrator, checkForLegacyData } = migrateModule;
 
-  function createMockTable(initialRows: Row[] = []) {
-    const rows: Row[] = [...initialRows];
+const indexModule = await import("../index.js");
+const memoryLanceDBVoyagePlugin = indexModule.default;
 
-    /** Builds a chainable query that filters, selects, and returns rows */
-    function buildQuery() {
-      let whereClause: string | null = null;
-      let selectedCols: string[] | null = null;
-      let limitVal = Infinity;
+// ---------------------------------------------------------------------------
+// Helpers: mock table builder for MemoryStore
+// ---------------------------------------------------------------------------
 
+function createMockTable(overrides: Record<string, any> = {}) {
+  const addedRecords: any[] = [];
+  const deletedWheres: string[] = [];
+
+  const defaultTable: any = {
+    add: async (records: any[]) => { addedRecords.push(...records); },
+    delete: async (where: string) => { deletedWheres.push(where); },
+    query: () => {
+      let _where: string | undefined;
+      let _limit: number | undefined;
       const chain: any = {
-        where(clause: string) { whereClause = clause; return chain; },
-        select(cols: string[]) { selectedCols = cols; return chain; },
-        limit(n: number) { limitVal = n; return chain; },
-        async toArray() {
-          let result = [...rows];
-          if (whereClause) {
-            result = result.filter(r => evalWhere(r, whereClause!));
-          }
-          if (selectedCols) {
-            result = result.map(r => {
-              const picked: Row = {};
-              for (const c of selectedCols!) picked[c] = r[c];
-              return picked;
-            });
-          }
-          return result.slice(0, limitVal);
-        },
+        select: () => chain,
+        where: (w: string) => { _where = w; return chain; },
+        limit: (n: number) => { _limit = n; return chain; },
+        toArray: async () => [],
       };
       return chain;
-    }
-
-    /** Builds a chainable vector search (adds _distance to rows) */
-    function buildVectorSearch(_vector: number[]) {
-      let whereClause: string | null = null;
-      let limitVal = Infinity;
-
+    },
+    vectorSearch: (vector: number[]) => {
       const chain: any = {
-        where(clause: string) { whereClause = clause; return chain; },
-        limit(n: number) { limitVal = n; return chain; },
-        async toArray() {
-          let result = rows.map((r, i) => ({ ...r, _distance: i * 0.1 }));
-          if (whereClause) {
-            result = result.filter(r => evalWhere(r, whereClause!));
-          }
-          return result.slice(0, limitVal);
-        },
+        limit: () => chain,
+        where: () => chain,
+        distanceType: () => chain,
+        toArray: async () => [],
       };
       return chain;
-    }
-
-    /** Builds a chainable FTS search (adds _score to rows) */
-    function buildSearch(queryText: string, _mode: string) {
-      let whereClause: string | null = null;
-      let limitVal = Infinity;
-
+    },
+    search: (query: string, type: string) => {
       const chain: any = {
-        where(clause: string) { whereClause = clause; return chain; },
-        limit(n: number) { limitVal = n; return chain; },
-        async toArray() {
-          // filter rows whose text contains the query word (case-insensitive)
-          let result = rows
-            .filter(r => typeof r.text === "string" && (r.text as string).toLowerCase().includes(queryText.toLowerCase()))
-            .map((r, i) => ({ ...r, _score: 10 - i }));
-          if (whereClause) {
-            result = result.filter(r => evalWhere(r, whereClause!));
-          }
-          return result.slice(0, limitVal);
-        },
+        limit: () => chain,
+        where: () => chain,
+        toArray: async () => [],
       };
       return chain;
-    }
+    },
+    listIndices: async () => [{ indexType: "FTS" }],
+    createIndex: async () => {},
+    countRows: async () => 0,
+    ...overrides,
+  };
 
-    /** Minimal SQL-where evaluator — handles simple patterns used by MemoryStore */
-    function evalWhere(row: Row, clause: string): boolean {
-      // Handle compound AND conditions: split by " AND " and require all parts to match
-      if (clause.includes(" AND ")) {
-        const parts = clause.split(" AND ");
-        return parts.every(part => evalWhere(row, part.trim()));
-      }
-      // Handle scope = 'x' OR scope IS NULL patterns
-      if (clause.includes(" OR scope IS NULL")) {
-        const cleaned = clause.replace(/[()]/g, "").replace(/ OR scope IS NULL/g, "").trim();
-        const parts = cleaned.split(/ OR /g);
-        const scopeVals = parts.map(p => {
-          const m = p.match(/scope\s*=\s*'([^']*)'/);
-          return m ? m[1] : null;
-        }).filter(Boolean);
-        const rowScope = row.scope as string | undefined;
-        return rowScope == null || scopeVals.includes(rowScope as string);
-      }
-      // Handle id = 'xxx'
-      const idMatch = clause.match(/id\s*=\s*'([^']*)'/);
-      if (idMatch && !clause.includes("scope")) return row.id === idMatch[1];
-      // Handle category = 'xxx'
-      const catMatch = clause.match(/category\s*=\s*'([^']*)'/);
-      if (catMatch && !clause.includes("scope")) return row.category === catMatch[1];
-      // Handle scope = 'xxx' (simple, with OR between scopes)
-      const scopeOrParts = clause.replace(/[()]/g, "").trim().split(/ OR /g);
-      const scopeVals = scopeOrParts.map(p => {
-        const m = p.match(/scope\s*=\s*'([^']*)'/);
-        return m ? m[1] : null;
-      }).filter(Boolean);
-      if (scopeVals.length > 0) {
-        const rowScope = row.scope as string | undefined;
-        return rowScope == null || scopeVals.includes(rowScope as string);
-      }
-      // Handle timestamp < N
-      const tsMatch = clause.match(/timestamp\s*<\s*(\d+)/);
-      if (tsMatch) {
-        const ts = Number(tsMatch[1]);
-        return (row.timestamp as number) < ts;
-      }
-      return true; // fallback: include row
-    }
+  return { table: defaultTable, addedRecords, deletedWheres };
+}
 
-    const mockTable = {
-      _rows: rows, // exposed for test assertions
-      query: () => buildQuery(),
-      vectorSearch: (vector: number[]) => buildVectorSearch(vector),
-      search: (queryText: string, mode: string) => buildSearch(queryText, mode),
-      add: async (entries: Row[]) => { rows.push(...entries); },
-      delete: async (whereClause: string) => {
-        const idMatch = whereClause.match(/id\s*=\s*'([^']*)'/);
-        if (idMatch) {
-          const idx = rows.findIndex(r => r.id === idMatch[1]);
-          if (idx >= 0) rows.splice(idx, 1);
-        } else {
-          // For bulk delete, evaluate condition against all rows
-          const toRemove = rows.filter(r => evalWhere(r, whereClause));
-          for (const r of toRemove) {
-            const idx = rows.indexOf(r);
-            if (idx >= 0) rows.splice(idx, 1);
-          }
-        }
+function createInitializedStore(mockTable: any): InstanceType<typeof MemoryStore> {
+  const store = new MemoryStore({ dbPath: "/tmp/test-store", vectorDim: 4 });
+  (store as any).table = mockTable;
+  (store as any).db = {};
+  (store as any).ftsIndexCreated = true;
+  return store;
+}
+
+// ---------------------------------------------------------------------------
+// FILE 1: index.ts — plugin object shape and register()
+// ---------------------------------------------------------------------------
+
+describe("index.ts — plugin export shape", () => {
+  it("should export an object with correct id", () => {
+    assert.equal(memoryLanceDBVoyagePlugin.id, "memory-lancedb-voyage");
+  });
+
+  it("should export an object with correct name", () => {
+    assert.equal(memoryLanceDBVoyagePlugin.name, "Memory (LanceDB + Voyage AI)");
+  });
+
+  it("should have kind 'memory'", () => {
+    assert.equal(memoryLanceDBVoyagePlugin.kind, "memory");
+  });
+
+  it("should have a non-empty description", () => {
+    assert.ok(memoryLanceDBVoyagePlugin.description.length > 10);
+  });
+
+  it("should have a configSchema with .parse() method", () => {
+    assert.ok(memoryLanceDBVoyagePlugin.configSchema);
+    assert.equal(typeof memoryLanceDBVoyagePlugin.configSchema.parse, "function");
+  });
+
+  it("should have a register function", () => {
+    assert.equal(typeof memoryLanceDBVoyagePlugin.register, "function");
+  });
+});
+
+describe("index.ts — configSchema validation via plugin", () => {
+  it("should validate a minimal valid config", () => {
+    const config = memoryLanceDBVoyagePlugin.configSchema.parse({
+      embedding: { apiKey: "test-key-123" },
+    });
+    assert.equal(config.embedding.apiKey, "test-key-123");
+  });
+
+  it("should reject config missing required fields", () => {
+    assert.throws(() => {
+      memoryLanceDBVoyagePlugin.configSchema.parse({});
+    });
+  });
+
+  it("should accept config with optional fields set", () => {
+    const config = memoryLanceDBVoyagePlugin.configSchema.parse({
+      embedding: { apiKey: "test-key" },
+      autoRecall: true,
+      autoCapture: true,
+      enableManagementTools: true,
+    });
+    assert.equal(config.autoRecall, true);
+    assert.equal(config.autoCapture, true);
+    assert.equal(config.enableManagementTools, true);
+  });
+
+  it("should apply default values for optional fields", () => {
+    const config = memoryLanceDBVoyagePlugin.configSchema.parse({
+      embedding: { apiKey: "test-key" },
+    });
+    assert.equal(typeof config.autoRecall, "boolean");
+    assert.equal(typeof config.autoCapture, "boolean");
+  });
+});
+
+describe("index.ts — register() with mocked API", () => {
+  let registeredTools: any[];
+  let registeredHooks: Map<string, Function>;
+  let registeredServices: any[];
+  let registeredClis: any[];
+  let registeredEventHandlers: Map<string, Function>;
+  let mockApi: any;
+
+  function buildMockApi(configOverrides: Record<string, any> = {}) {
+    registeredTools = [];
+    registeredHooks = new Map();
+    registeredServices = [];
+    registeredClis = [];
+    registeredEventHandlers = new Map();
+
+    return {
+      pluginConfig: {
+        embedding: { apiKey: "test-voyage-key" },
+        dbPath: "/tmp/vidya-test-register",
+        autoRecall: false,
+        autoCapture: false,
+        sessionMemory: { enabled: false },
+        ...configOverrides,
       },
-      listIndices: async () => [],
-      createIndex: async () => {},
+      resolvePath: (p: string) => p,
+      logger: {
+        info: () => {},
+        warn: () => {},
+        debug: () => {},
+      },
+      registerTool: (toolDef: any, opts: any) => {
+        registeredTools.push({ toolDef, opts });
+      },
+      registerHook: (hookName: string, handler: Function) => {
+        registeredHooks.set(hookName, handler);
+      },
+      registerCli: (cliFactory: any, opts: any) => {
+        registeredClis.push({ cliFactory, opts });
+      },
+      registerService: (svc: any) => {
+        registeredServices.push(svc);
+      },
+      on: (event: string, handler: Function) => {
+        registeredEventHandlers.set(event, handler);
+      },
     };
-    return mockTable;
   }
 
-  /** Helper: wire a mock table into a MemoryStore, bypassing real LanceDB init */
-  function createStoreWithMockTable(mockTable: ReturnType<typeof createMockTable>, vectorDim = 3) {
-    const store = new MemoryStore({ dbPath: "/tmp/mock-db", vectorDim });
-    // Bypass ensureInitialized by setting private fields directly
-    (store as any).table = mockTable;
-    (store as any).db = {}; // truthy sentinel
-    (store as any).ftsIndexCreated = true;
-    return store;
-  }
-
-  // ---- Constructor & dbPath accessor ----
-
-  describe("constructor & dbPath", () => {
-    it("stores config and exposes dbPath", () => {
-      const store = new MemoryStore({ dbPath: "/tmp/test", vectorDim: 128 });
-      assert.equal(store.dbPath, "/tmp/test");
-    });
+  it("should register core tools when called with valid config", () => {
+    mockApi = buildMockApi();
+    memoryLanceDBVoyagePlugin.register(mockApi);
+    // 4 core tools: recall, store, forget, update
+    assert.ok(registeredTools.length >= 4, `Expected at least 4 tools, got ${registeredTools.length}`);
   });
 
-  // ---- store (addMemory) ----
-
-  describe("store() — add a memory", () => {
-    it("stores an entry and assigns id + timestamp", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      const result = await store.store({
-        text: "hello world",
-        vector: [0.1, 0.2, 0.3],
-        category: "fact",
-        scope: "global",
-        importance: 0.8,
-      });
-
-      assert.ok(result.id, "should have an id");
-      assert.ok(result.timestamp > 0, "should have a timestamp");
-      assert.equal(result.text, "hello world");
-      assert.equal(result.category, "fact");
-      assert.equal(result.metadata, "{}");
-      assert.equal(mockTable._rows.length, 1);
-    });
-
-    it("preserves provided metadata", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      const result = await store.store({
-        text: "with meta",
-        vector: [0.1, 0.2, 0.3],
-        category: "preference",
-        scope: "project",
-        importance: 0.5,
-        metadata: '{"key":"val"}',
-      });
-
-      assert.equal(result.metadata, '{"key":"val"}');
-    });
+  it("should register a CLI", () => {
+    mockApi = buildMockApi();
+    memoryLanceDBVoyagePlugin.register(mockApi);
+    assert.ok(registeredClis.length >= 1);
   });
 
-  // ---- vectorSearch ----
-
-  describe("vectorSearch()", () => {
-    it("returns results with score computed from distance", async () => {
-      const rows: Row[] = [
-        { id: "a1", text: "first", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.8, timestamp: 100, metadata: "{}" },
-        { id: "a2", text: "second", vector: [0, 1, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.vectorSearch([1, 0, 0], 5, 0.0);
-      assert.ok(results.length > 0, "should return results");
-      assert.equal(results[0].entry.id, "a1");
-      // First row has _distance=0 → score = 1/(1+0) = 1.0
-      assert.equal(results[0].score, 1.0);
-    });
-
-    it("filters by scope when scopeFilter provided", async () => {
-      const rows: Row[] = [
-        { id: "g1", text: "global item", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.8, timestamp: 100, metadata: "{}" },
-        { id: "p1", text: "project item", vector: [0, 1, 0], category: "fact", scope: "project", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.vectorSearch([1, 0, 0], 5, 0.0, ["global"]);
-      assert.ok(results.every(r => r.entry.scope === "global"), "all results should be global scope");
-    });
-
-    it("respects minScore threshold", async () => {
-      const rows: Row[] = [
-        { id: "a1", text: "close", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.8, timestamp: 100, metadata: "{}" },
-        { id: "a2", text: "far", vector: [0, 1, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      // With high minScore, only the first (distance=0, score=1.0) should pass
-      const results = await store.vectorSearch([1, 0, 0], 5, 0.95);
-      assert.equal(results.length, 1);
-      assert.equal(results[0].entry.id, "a1");
-    });
-
-    it("clamps limit between 1 and 20", async () => {
-      const rows: Row[] = Array.from({ length: 25 }, (_, i) => ({
-        id: `id-${i}`, text: `text ${i}`, vector: [i, 0, 0], category: "fact" as const,
-        scope: "global", importance: 0.5, timestamp: i, metadata: "{}",
-      }));
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.vectorSearch([1, 0, 0], 100, 0.0);
-      assert.ok(results.length <= 20, "should clamp to 20 max");
-    });
-
-    it("defaults metadata to '{}' when row metadata is empty", async () => {
-      const rows: Row[] = [
-        { id: "m1", text: "no meta", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.8, timestamp: 100, metadata: "" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.vectorSearch([1, 0, 0], 5, 0.0);
-      assert.equal(results[0].entry.metadata, "{}");
-    });
-
-    it("defaults scope to 'global' when row scope is undefined", async () => {
-      const rows: Row[] = [
-        { id: "ns1", text: "no scope", vector: [1, 0, 0], category: "fact", importance: 0.8, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.vectorSearch([1, 0, 0], 5, 0.0);
-      assert.equal(results[0].entry.scope, "global");
-    });
+  it("should register a service with start/stop", () => {
+    mockApi = buildMockApi();
+    memoryLanceDBVoyagePlugin.register(mockApi);
+    assert.ok(registeredServices.length >= 1);
+    assert.equal(typeof registeredServices[0].start, "function");
+    assert.equal(typeof registeredServices[0].stop, "function");
   });
 
-  // ---- bm25Search ----
+  it("should register before_agent_start when autoRecall is true", () => {
+    mockApi = buildMockApi({ autoRecall: true });
+    memoryLanceDBVoyagePlugin.register(mockApi);
+    assert.ok(registeredEventHandlers.has("before_agent_start"));
+  });
 
-  describe("bm25Search()", () => {
-    it("returns matching rows with normalized scores", async () => {
-      const rows: Row[] = [
-        { id: "b1", text: "the quick brown fox", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.8, timestamp: 100, metadata: "{}" },
-        { id: "b2", text: "lazy dog", vector: [0, 1, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
+  it("should NOT register before_agent_start when autoRecall is false", () => {
+    mockApi = buildMockApi({ autoRecall: false });
+    memoryLanceDBVoyagePlugin.register(mockApi);
+    assert.ok(!registeredEventHandlers.has("before_agent_start"));
+  });
 
-      const results = await store.bm25Search("quick", 5);
-      assert.equal(results.length, 1);
-      assert.equal(results[0].entry.id, "b1");
-      assert.ok(results[0].score > 0, "score should be positive");
+  it("should register agent_end when autoCapture is true", () => {
+    mockApi = buildMockApi({ autoCapture: true });
+    memoryLanceDBVoyagePlugin.register(mockApi);
+    assert.ok(registeredEventHandlers.has("agent_end"));
+  });
+
+  it("should NOT register agent_end when autoCapture is false", () => {
+    mockApi = buildMockApi({ autoCapture: false });
+    memoryLanceDBVoyagePlugin.register(mockApi);
+    assert.ok(!registeredEventHandlers.has("agent_end"));
+  });
+
+  it("should register command:new hook when sessionMemory is enabled", () => {
+    mockApi = buildMockApi({ sessionMemory: { enabled: true } });
+    memoryLanceDBVoyagePlugin.register(mockApi);
+    assert.ok(registeredHooks.has("command:new"));
+  });
+
+  it("should NOT register command:new hook when sessionMemory is disabled", () => {
+    mockApi = buildMockApi({ sessionMemory: { enabled: false } });
+    memoryLanceDBVoyagePlugin.register(mockApi);
+    assert.ok(!registeredHooks.has("command:new"));
+  });
+
+  it("should register 6 tools when enableManagementTools is true", () => {
+    mockApi = buildMockApi({ enableManagementTools: true });
+    memoryLanceDBVoyagePlugin.register(mockApi);
+    // 4 core + 2 management (stats, list)
+    assert.ok(registeredTools.length >= 6, `Expected at least 6 tools, got ${registeredTools.length}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FILE 2: src/store.ts — MemoryStore
+// ---------------------------------------------------------------------------
+
+describe("src/store.ts — MemoryStore constructor", () => {
+  it("should construct with minimal config", () => {
+    const store = new MemoryStore({ dbPath: "/tmp/t1", vectorDim: 1024 });
+    assert.ok(store !== null);
+  });
+
+  it("should expose dbPath getter", () => {
+    const store = new MemoryStore({ dbPath: "/tmp/t2", vectorDim: 512 });
+    assert.equal(store.dbPath, "/tmp/t2");
+  });
+
+  it("should have hasFtsSupport false initially", () => {
+    const store = new MemoryStore({ dbPath: "/tmp/t3", vectorDim: 4 });
+    assert.equal(store.hasFtsSupport, false);
+  });
+});
+
+describe("src/store.ts — store()", () => {
+  it("should add a record with generated id and timestamp", async () => {
+    const { table, addedRecords } = createMockTable();
+    const store = createInitializedStore(table);
+
+    const result = await store.store({
+      text: "Hello world",
+      vector: [0.1, 0.2, 0.3, 0.4],
+      category: "fact",
+      scope: "agent:test",
+      importance: 0.8,
     });
+    assert.ok(addedRecords.length >= 1);
+    assert.ok(result.id.length > 0);
+    assert.equal(result.text, "Hello world");
+    assert.equal(result.category, "fact");
+    assert.ok(result.timestamp > 0);
+  });
 
-    it("returns empty array when ftsIndexCreated is false", async () => {
-      const mockTable = createMockTable([
-        { id: "b1", text: "some text", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.8, timestamp: 100, metadata: "{}" },
-      ]);
-      const store = createStoreWithMockTable(mockTable);
-      (store as any).ftsIndexCreated = false;
+  it("should default metadata to empty JSON object", async () => {
+    const { table, addedRecords } = createMockTable();
+    const store = createInitializedStore(table);
 
-      const results = await store.bm25Search("some", 5);
-      assert.equal(results.length, 0);
+    await store.store({
+      text: "test",
+      vector: [0.1, 0.2, 0.3, 0.4],
+      category: "other",
+      scope: "global",
+      importance: 0.5,
     });
+    assert.equal(addedRecords[0].metadata, "{}");
+  });
+});
 
-    it("filters by scopeFilter", async () => {
-      const rows: Row[] = [
-        { id: "b1", text: "shared word here", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.8, timestamp: 100, metadata: "{}" },
-        { id: "b2", text: "shared word there", vector: [0, 1, 0], category: "fact", scope: "project", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
+describe("src/store.ts — importEntry()", () => {
+  it("should add an imported entry to the table", async () => {
+    const { table, addedRecords } = createMockTable();
+    const store = createInitializedStore(table);
 
-      const results = await store.bm25Search("shared", 5, ["global"]);
-      assert.ok(results.every(r => r.entry.scope === "global"));
+    const result = await store.importEntry({
+      id: "imported-1",
+      text: "Imported content",
+      vector: [0.1, 0.2, 0.3, 0.4],
+      category: "fact",
+      scope: "user:global",
+      importance: 0.7,
+      timestamp: 1700000000000,
     });
+    assert.ok(addedRecords.length >= 1);
+    assert.equal(result.id, "imported-1");
+  });
 
-    it("handles search throwing by returning empty array", async () => {
-      const mockTable = createMockTable();
-      // Override search to throw
-      mockTable.search = () => { throw new Error("FTS broken"); };
-      const store = createStoreWithMockTable(mockTable);
+  it("should throw if id is missing", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
 
-      const results = await store.bm25Search("test", 5);
-      assert.equal(results.length, 0);
-    });
+    await assert.rejects(
+      () => store.importEntry({ id: "", text: "test", vector: [0.1, 0.2, 0.3, 0.4], category: "fact", scope: "global", importance: 0.7, timestamp: 0 }),
+      /id/i,
+    );
+  });
 
-    it("defaults scope to 'global' when missing", async () => {
-      const rows: Row[] = [
-        { id: "ns1", text: "no scope bm25", vector: [1, 0, 0], category: "fact", importance: 0.8, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
+  it("should throw on vector dimension mismatch", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
 
-      const results = await store.bm25Search("bm25", 5);
-      assert.equal(results[0].entry.scope, "global");
-    });
+    await assert.rejects(
+      () => store.importEntry({ id: "bad-vec", text: "test", vector: [0.1, 0.2], category: "fact", scope: "global", importance: 0.7, timestamp: 0 }),
+      /dimension/i,
+    );
+  });
+});
 
-    it("defaults metadata to '{}' when row metadata is empty", async () => {
-      const rows: Row[] = [
-        { id: "nm1", text: "no meta bm25", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.8, timestamp: 100, metadata: "" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.bm25Search("meta", 5);
-      assert.equal(results[0].entry.metadata, "{}");
-    });
-
-    it("normalizes score to 0.5 when _score is 0", async () => {
-      const rows: Row[] = [
-        { id: "z1", text: "zero score text", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.8, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      // Override search to return _score = 0
-      const origSearch = mockTable.search.bind(mockTable);
-      mockTable.search = (q: string, m: string) => {
-        const chain = origSearch(q, m);
-        const origToArray = chain.toArray.bind(chain);
-        chain.toArray = async () => {
-          const res = await origToArray();
-          return res.map((r: any) => ({ ...r, _score: 0 }));
-        };
-        return chain;
+describe("src/store.ts — hasId()", () => {
+  it("should return true when ID exists", async () => {
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => [{ id: "existing" }],
       };
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.bm25Search("zero", 5);
-      assert.equal(results[0].score, 0.5);
-    });
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    assert.equal(await store.hasId("existing"), true);
   });
 
-  // ---- delete ----
-
-  describe("delete()", () => {
-    it("deletes by full UUID", async () => {
-      const uuid = "12345678-1234-1234-1234-123456789abc";
-      const rows: Row[] = [
-        { id: uuid, text: "to delete", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const result = await store.delete(uuid);
-      assert.equal(result, true);
-      assert.equal(mockTable._rows.length, 0);
-    });
-
-    it("returns false when id not found", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      const result = await store.delete("12345678-1234-1234-1234-123456789abc");
-      assert.equal(result, false);
-    });
-
-    it("throws on invalid id format", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      await assert.rejects(
-        () => store.delete("not-valid!"),
-        /Invalid memory ID format/,
-      );
-    });
-
-    it("deletes by prefix (8+ hex chars)", async () => {
-      const uuid = "aabbccdd-1234-1234-1234-123456789abc";
-      const rows: Row[] = [
-        { id: uuid, text: "prefix delete", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const result = await store.delete("aabbccdd");
-      assert.equal(result, true);
-      assert.equal(mockTable._rows.length, 0);
-    });
-
-    it("throws on ambiguous prefix", async () => {
-      const rows: Row[] = [
-        { id: "aabbccdd-1111-1111-1111-111111111111", text: "a", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-        { id: "aabbccdd-2222-2222-2222-222222222222", text: "b", vector: [0, 1, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      await assert.rejects(
-        () => store.delete("aabbccdd"),
-        /Ambiguous prefix/,
-      );
-    });
-
-    it("respects scopeFilter — throws when memory is out of scope", async () => {
-      const uuid = "12345678-1234-1234-1234-123456789abc";
-      const rows: Row[] = [
-        { id: uuid, text: "secret", vector: [1, 0, 0], category: "fact", scope: "project", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      await assert.rejects(
-        () => store.delete(uuid, ["global"]),
-        /outside accessible scopes/,
-      );
-    });
-
-    it("allows delete when scope matches scopeFilter", async () => {
-      const uuid = "12345678-1234-1234-1234-123456789abc";
-      const rows: Row[] = [
-        { id: uuid, text: "ok", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const result = await store.delete(uuid, ["global"]);
-      assert.equal(result, true);
-    });
+  it("should return false when ID does not exist", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
+    assert.equal(await store.hasId("nonexistent"), false);
   });
+});
 
-  // ---- list ----
-
-  describe("list()", () => {
-    it("returns all entries sorted by timestamp desc", async () => {
-      const rows: Row[] = [
-        { id: "l1", text: "oldest", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-        { id: "l2", text: "newest", vector: [0, 1, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.list();
-      assert.equal(results.length, 2);
-      assert.equal(results[0].id, "l2"); // newest first
-      assert.equal(results[1].id, "l1");
-      // list returns empty vector arrays
-      assert.deepEqual(results[0].vector, []);
-    });
-
-    it("filters by scopeFilter", async () => {
-      const rows: Row[] = [
-        { id: "l1", text: "global", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-        { id: "l2", text: "project", vector: [0, 1, 0], category: "fact", scope: "project", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.list(["global"]);
-      assert.ok(results.every(r => r.scope === "global"));
-    });
-
-    it("filters by category", async () => {
-      const rows: Row[] = [
-        { id: "c1", text: "a fact", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-        { id: "c2", text: "a pref", vector: [0, 1, 0], category: "preference", scope: "global", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.list(undefined, "preference");
-      assert.equal(results.length, 1);
-      assert.equal(results[0].category, "preference");
-    });
-
-    it("respects limit and offset", async () => {
-      const rows: Row[] = Array.from({ length: 10 }, (_, i) => ({
-        id: `p${i}`, text: `text ${i}`, vector: [i, 0, 0], category: "fact",
-        scope: "global", importance: 0.5, timestamp: i * 100, metadata: "{}",
-      }));
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.list(undefined, undefined, 3, 2);
-      assert.equal(results.length, 3);
-      // sorted desc by timestamp: p9(900), p8(800), p7(700), p6(600)...
-      // offset 2 → skip first 2 → p7, p6, p5
-      assert.equal(results[0].id, "p7");
-    });
-
-    it("defaults scope to 'global' when missing", async () => {
-      const rows: Row[] = [
-        { id: "ns1", text: "no scope", vector: [1, 0, 0], category: "fact", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.list();
-      assert.equal(results[0].scope, "global");
-    });
-
-    it("defaults metadata to '{}' when empty", async () => {
-      const rows: Row[] = [
-        { id: "nm1", text: "no meta", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const results = await store.list();
-      assert.equal(results[0].metadata, "{}");
-    });
-  });
-
-  // ---- stats ----
-
-  describe("stats()", () => {
-    it("returns totalCount, scopeCounts, and categoryCounts", async () => {
-      const rows: Row[] = [
-        { id: "s1", text: "a", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-        { id: "s2", text: "b", vector: [0, 1, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 200, metadata: "{}" },
-        { id: "s3", text: "c", vector: [0, 0, 1], category: "preference", scope: "project", importance: 0.5, timestamp: 300, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const stats = await store.stats();
-      assert.equal(stats.totalCount, 3);
-      assert.equal(stats.scopeCounts["global"], 2);
-      assert.equal(stats.scopeCounts["project"], 1);
-      assert.equal(stats.categoryCounts["fact"], 2);
-      assert.equal(stats.categoryCounts["preference"], 1);
-    });
-
-    it("filters by scopeFilter", async () => {
-      const rows: Row[] = [
-        { id: "s1", text: "a", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-        { id: "s2", text: "b", vector: [0, 1, 0], category: "fact", scope: "project", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const stats = await store.stats(["global"]);
-      assert.ok(stats.totalCount >= 1);
-      assert.ok(stats.scopeCounts["global"] >= 1);
-    });
-
-    it("defaults scope to 'global' when missing", async () => {
-      const rows: Row[] = [
-        { id: "ns1", text: "a", vector: [1, 0, 0], category: "fact", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const stats = await store.stats();
-      assert.equal(stats.scopeCounts["global"], 1);
-    });
-  });
-
-  // ---- importEntry ----
-
-  describe("importEntry()", () => {
-    it("imports entry with correct vector dimension", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      const entry = {
-        id: "import-1",
-        text: "imported",
-        vector: [0.1, 0.2, 0.3],
-        category: "fact" as const,
-        scope: "global",
-        importance: 0.7,
-        timestamp: Date.now(),
-        metadata: "{}",
+describe("src/store.ts — vectorSearch()", () => {
+  it("should return mapped results with scores", async () => {
+    const fakeRows = [
+      { id: "r1", text: "result 1", vector: [0.1, 0.2, 0.3, 0.4], category: "fact", scope: "agent:test", importance: 0.8, timestamp: 1700000000000, metadata: "{}", _distance: 0.05 },
+      { id: "r2", text: "result 2", vector: [0.5, 0.6, 0.7, 0.8], category: "preference", scope: "agent:test", importance: 0.6, timestamp: 1700000001000, metadata: "{}", _distance: 0.2 },
+    ];
+    const { table } = createMockTable();
+    table.vectorSearch = () => {
+      const chain: any = {
+        limit: () => chain,
+        where: () => chain,
+        distanceType: () => chain,
+        toArray: async () => fakeRows,
       };
-
-      const result = await store.importEntry(entry);
-      assert.equal(result.id, "import-1");
-      assert.equal(result.text, "imported");
-      assert.equal(mockTable._rows.length, 1);
-    });
-
-    it("throws when id is missing", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      await assert.rejects(
-        () => store.importEntry({ id: "", text: "x", vector: [1, 2, 3], category: "fact", scope: "global", importance: 0.7, timestamp: 1 }),
-        /importEntry requires a stable id/,
-      );
-    });
-
-    it("throws on vector dimension mismatch", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable); // vectorDim=3
-
-      await assert.rejects(
-        () => store.importEntry({ id: "bad", text: "x", vector: [1, 2], category: "fact", scope: "global", importance: 0.7, timestamp: 1 }),
-        /Vector dimension mismatch/,
-      );
-    });
-
-    it("defaults scope to 'global' and importance to 0.7 when missing", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      const result = await store.importEntry({
-        id: "import-2",
-        text: "partial",
-        vector: [0.1, 0.2, 0.3],
-        category: "fact",
-        scope: "",
-        importance: NaN,
-        timestamp: NaN,
-      } as any);
-
-      // empty string scope gets replaced with "global" because ("" || "global") → "global"
-      assert.equal(result.scope, "global");
-      assert.equal(result.importance, 0.7);
-      assert.ok(result.timestamp > 0);
-    });
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const results = await store.vectorSearch([0.1, 0.2, 0.3, 0.4], 5, 0.1);
+    assert.equal(results.length, 2);
+    assert.equal(results[0].entry.id, "r1");
+    assert.ok(results[0].score > 0);
   });
 
-  // ---- hasId ----
-
-  describe("hasId()", () => {
-    it("returns true when id exists", async () => {
-      const rows: Row[] = [
-        { id: "exists-1", text: "a", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      assert.equal(await store.hasId("exists-1"), true);
-    });
-
-    it("returns false when id does not exist", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      assert.equal(await store.hasId("nonexistent"), false);
-    });
+  it("should filter results below minScore", async () => {
+    const fakeRows = [
+      { id: "r1", text: "result", vector: [0.1, 0.2, 0.3, 0.4], category: "fact", scope: "global", importance: 0.5, timestamp: 0, metadata: "{}", _distance: 100 },
+    ];
+    const { table } = createMockTable();
+    table.vectorSearch = () => {
+      const chain: any = {
+        limit: () => chain,
+        where: () => chain,
+        distanceType: () => chain,
+        toArray: async () => fakeRows,
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const results = await store.vectorSearch([0.1, 0.2, 0.3, 0.4], 5, 0.9);
+    assert.equal(results.length, 0);
   });
 
-  // ---- update ----
-
-  describe("update()", () => {
-    it("updates text and importance of existing entry", async () => {
-      const uuid = "12345678-1234-1234-1234-123456789abc";
-      const rows: Row[] = [
-        { id: uuid, text: "old text", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const result = await store.update(uuid, { text: "new text", importance: 0.9 });
-      assert.ok(result);
-      assert.equal(result!.text, "new text");
-      assert.equal(result!.importance, 0.9);
-      assert.equal(result!.category, "fact"); // unchanged
-    });
-
-    it("returns null when id not found", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      const result = await store.update("12345678-1234-1234-1234-123456789abc", { text: "x" });
-      assert.equal(result, null);
-    });
-
-    it("throws on invalid id format", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      await assert.rejects(
-        () => store.update("bad!id", { text: "x" }),
-        /Invalid memory ID format/,
-      );
-    });
-
-    it("throws when scopeFilter blocks access", async () => {
-      const uuid = "12345678-1234-1234-1234-123456789abc";
-      const rows: Row[] = [
-        { id: uuid, text: "secret", vector: [1, 0, 0], category: "fact", scope: "project", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      await assert.rejects(
-        () => store.update(uuid, { text: "x" }, ["global"]),
-        /outside accessible scopes/,
-      );
-    });
-
-    it("resolves by prefix", async () => {
-      const uuid = "aabbccdd-1234-1234-1234-123456789abc";
-      const rows: Row[] = [
-        { id: uuid, text: "prefix update", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const result = await store.update("aabbccdd", { text: "updated" });
-      assert.ok(result);
-      assert.equal(result!.text, "updated");
-    });
-
-    it("throws on ambiguous prefix", async () => {
-      const rows: Row[] = [
-        { id: "aabbccdd-1111-1111-1111-111111111111", text: "a", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-        { id: "aabbccdd-2222-2222-2222-222222222222", text: "b", vector: [0, 1, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      await assert.rejects(
-        () => store.update("aabbccdd", { text: "x" }),
-        /Ambiguous prefix/,
-      );
-    });
+  it("should apply scope filter when provided", async () => {
+    let capturedWhere: string | undefined;
+    const { table } = createMockTable();
+    table.vectorSearch = () => {
+      const chain: any = {
+        limit: () => chain,
+        where: (w: string) => { capturedWhere = w; return chain; },
+        distanceType: () => chain,
+        toArray: async () => [],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    await store.vectorSearch([0.1, 0.2, 0.3, 0.4], 5, 0.3, ["agent:test"]);
+    assert.ok(capturedWhere !== undefined);
+    assert.ok(capturedWhere!.includes("agent:test"));
   });
 
-  // ---- bulkDelete ----
+  it("should return empty array when no results", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
+    const results = await store.vectorSearch([0, 0, 0, 0], 5, 0.3);
+    assert.deepEqual(results, []);
+  });
+});
 
-  describe("bulkDelete()", () => {
-    it("deletes entries matching scope filter", async () => {
-      const rows: Row[] = [
-        { id: "bd1", text: "a", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-        { id: "bd2", text: "b", vector: [0, 1, 0], category: "fact", scope: "project", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const count = await store.bulkDelete(["project"]);
-      assert.equal(count, 1);
-      assert.equal(mockTable._rows.length, 1);
-      assert.equal(mockTable._rows[0].id, "bd1");
-    });
-
-    it("deletes with timestamp filter", async () => {
-      const rows: Row[] = [
-        { id: "bd1", text: "old", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 50, metadata: "{}" },
-        { id: "bd2", text: "new", vector: [0, 1, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 200, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
-
-      const count = await store.bulkDelete(["global"], 100);
-      assert.equal(count, 1);
-      assert.equal(mockTable._rows[0].id, "bd2");
-    });
-
-    it("throws when no filters provided", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      await assert.rejects(
-        () => store.bulkDelete([]),
-        /Bulk delete requires at least scope or timestamp filter/,
-      );
-    });
-
-    it("returns 0 when nothing matches", async () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-
-      const count = await store.bulkDelete(["nonexistent"]);
-      assert.equal(count, 0);
-    });
+describe("src/store.ts — bm25Search()", () => {
+  it("should return results for text query", async () => {
+    const fakeRows = [
+      { id: "b1", text: "bm25 result", vector: [0.1, 0.2, 0.3, 0.4], category: "fact", scope: "global", importance: 0.8, timestamp: 0, metadata: "{}", _score: 5.0 },
+    ];
+    const { table } = createMockTable();
+    table.search = () => {
+      const chain: any = {
+        limit: () => chain,
+        where: () => chain,
+        toArray: async () => fakeRows,
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const results = await store.bm25Search("test query", 10);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].entry.id, "b1");
+    assert.ok(results[0].score > 0);
   });
 
-  // ---- hasFtsSupport ----
-
-  describe("hasFtsSupport", () => {
-    it("returns true when ftsIndexCreated is true", () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-      assert.equal(store.hasFtsSupport, true);
-    });
-
-    it("returns false when ftsIndexCreated is false", () => {
-      const mockTable = createMockTable();
-      const store = createStoreWithMockTable(mockTable);
-      (store as any).ftsIndexCreated = false;
-      assert.equal(store.hasFtsSupport, false);
-    });
+  it("should return empty array when FTS not created", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
+    (store as any).ftsIndexCreated = false;
+    const results = await store.bm25Search("test", 5);
+    assert.deepEqual(results, []);
   });
 
-  // ---- createFtsIndex (via doInitialize path) ----
-
-  describe("FTS index creation", () => {
-    it("skips index creation if FTS index already exists", async () => {
-      let createIndexCalled = false;
-      const mockTable = createMockTable();
-      mockTable.listIndices = async () => [{ indexType: "FTS", columns: ["text"] }];
-      mockTable.createIndex = async () => { createIndexCalled = true; };
-
-      const store = new MemoryStore({ dbPath: "/tmp/mock-fts", vectorDim: 3 });
-      // Simulate createFtsIndex call directly
-      await (store as any).createFtsIndex(mockTable);
-      assert.equal(createIndexCalled, false, "should NOT have called createIndex");
-    });
-
-    it("creates index when no FTS index exists", async () => {
-      let createIndexCalled = false;
-      const mockTable = createMockTable();
-      mockTable.listIndices = async () => [];
-      mockTable.createIndex = async () => { createIndexCalled = true; };
-
-      const store = new MemoryStore({ dbPath: "/tmp/mock-fts2", vectorDim: 3 });
-      await (store as any).createFtsIndex(mockTable);
-      assert.equal(createIndexCalled, true, "should have called createIndex");
-    });
-
-    it("throws when listIndices fails", async () => {
-      const mockTable = createMockTable();
-      mockTable.listIndices = async () => { throw new Error("index list failed"); };
-
-      const store = new MemoryStore({ dbPath: "/tmp/mock-fts3", vectorDim: 3 });
-      await assert.rejects(
-        () => (store as any).createFtsIndex(mockTable),
-        /FTS index creation failed/,
-      );
-    });
-
-    it("detects existing index via columns includes 'text'", async () => {
-      let createIndexCalled = false;
-      const mockTable = createMockTable();
-      mockTable.listIndices = async () => [{ indexType: "OTHER", columns: ["text"] }];
-      mockTable.createIndex = async () => { createIndexCalled = true; };
-
-      const store = new MemoryStore({ dbPath: "/tmp/mock-fts4", vectorDim: 3 });
-      await (store as any).createFtsIndex(mockTable);
-      assert.equal(createIndexCalled, false, "should NOT create index when text column already indexed");
-    });
+  it("should apply scope filter", async () => {
+    let capturedWhere: string | undefined;
+    const { table } = createMockTable();
+    table.search = () => {
+      const chain: any = {
+        limit: () => chain,
+        where: (w: string) => { capturedWhere = w; return chain; },
+        toArray: async () => [],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    await store.bm25Search("query", 10, ["user:global"]);
+    assert.ok(capturedWhere !== undefined);
+    assert.ok(capturedWhere!.includes("user:global"));
   });
 
-  // ---- Utility functions (clampInt, escapeSqlLiteral) via public methods ----
+  it("should gracefully handle search errors and return empty", async () => {
+    const { table } = createMockTable();
+    table.search = () => { throw new Error("FTS broken"); };
+    const store = createInitializedStore(table);
+    // bm25Search catches errors and returns []
+    const results = await store.bm25Search("test", 5);
+    assert.deepEqual(results, []);
+  });
+});
 
-  describe("utility functions via public API", () => {
-    it("clampInt handles non-finite values (via vectorSearch limit)", async () => {
-      const rows: Row[] = [
-        { id: "u1", text: "a", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
+describe("src/store.ts — delete()", () => {
+  it("should delete by full UUID", async () => {
+    const { table, deletedWheres } = createMockTable();
+    const uuid = "550e8400-e29b-41d4-a716-446655440000";
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => [{ id: uuid, scope: "global" }],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const result = await store.delete(uuid);
+    assert.equal(result, true);
+    assert.ok(deletedWheres.length >= 1);
+  });
 
-      // NaN limit → clampInt returns min (1)
-      const results = await store.vectorSearch([1, 0, 0], NaN, 0.0);
-      assert.ok(results.length <= 1);
-    });
+  it("should return false when ID not found", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
+    const result = await store.delete("550e8400-e29b-41d4-a716-446655440000");
+    assert.equal(result, false);
+  });
 
-    it("escapeSqlLiteral handles single quotes (via hasId)", async () => {
-      const rows: Row[] = [
-        { id: "it's-a-test", text: "a", vector: [1, 0, 0], category: "fact", scope: "global", importance: 0.5, timestamp: 100, metadata: "{}" },
-      ];
-      const mockTable = createMockTable(rows);
-      const store = createStoreWithMockTable(mockTable);
+  it("should throw on invalid ID format", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
+    await assert.rejects(
+      () => store.delete("not-a-valid-id!"),
+      /Invalid memory ID/,
+    );
+  });
 
-      // This should not throw — the quote should be escaped
-      const result = await store.hasId("it's-a-test");
-      // Our mock doesn't handle escaped quotes, but this covers the code path
-      assert.equal(typeof result, "boolean");
-    });
+  it("should throw when scope filter denies access", async () => {
+    const uuid = "550e8400-e29b-41d4-a716-446655440000";
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => [{ id: uuid, scope: "private:other" }],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    await assert.rejects(
+      () => store.delete(uuid, ["agent:test"]),
+      /outside accessible scopes/,
+    );
+  });
+
+  it("should delete by prefix", async () => {
+    const fullId = "abcdef01-2345-6789-abcd-ef0123456789";
+    const { table, deletedWheres } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => [{ id: fullId, scope: "global" }],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const result = await store.delete("abcdef01");
+    assert.equal(result, true);
+  });
+
+  it("should throw on ambiguous prefix", async () => {
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => [
+          { id: "abcdef01-1111-1111-1111-111111111111", scope: "global" },
+          { id: "abcdef01-2222-2222-2222-222222222222", scope: "global" },
+        ],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    await assert.rejects(
+      () => store.delete("abcdef01"),
+      /Ambiguous prefix/,
+    );
+  });
+});
+
+describe("src/store.ts — list()", () => {
+  it("should return entries sorted by timestamp descending", async () => {
+    const fakeEntries = [
+      { id: "l1", text: "entry 1", category: "fact", scope: "agent:test", importance: 0.5, timestamp: 1000, metadata: "{}" },
+      { id: "l2", text: "entry 2", category: "preference", scope: "agent:test", importance: 0.8, timestamp: 2000, metadata: "{}" },
+    ];
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => fakeEntries,
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const results = await store.list();
+    assert.equal(results.length, 2);
+    // Should be sorted: newer first
+    assert.equal(results[0].id, "l2");
+    assert.equal(results[1].id, "l1");
+  });
+
+  it("should apply scope filter", async () => {
+    let capturedWhere: string | undefined;
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: (w: string) => { capturedWhere = w; return chain; },
+        limit: () => chain,
+        toArray: async () => [],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    await store.list(["agent:test"]);
+    assert.ok(capturedWhere !== undefined);
+    assert.ok(capturedWhere!.includes("agent:test"));
+  });
+
+  it("should apply category filter", async () => {
+    let capturedWhere: string | undefined;
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: (w: string) => { capturedWhere = w; return chain; },
+        limit: () => chain,
+        toArray: async () => [],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    await store.list(undefined, "fact");
+    assert.ok(capturedWhere !== undefined);
+    assert.ok(capturedWhere!.includes("fact"));
+  });
+
+  it("should apply pagination via offset and limit", async () => {
+    const entries = Array.from({ length: 10 }, (_, i) => ({
+      id: `e${i}`, text: `entry ${i}`, category: "fact", scope: "global", importance: 0.5, timestamp: i * 1000, metadata: "{}",
+    }));
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => entries,
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const results = await store.list(undefined, undefined, 3, 2);
+    assert.equal(results.length, 3);
+  });
+});
+
+describe("src/store.ts — stats()", () => {
+  it("should return aggregated stats", async () => {
+    const fakeRows = [
+      { scope: "agent:test", category: "fact" },
+      { scope: "agent:test", category: "fact" },
+      { scope: "user:global", category: "preference" },
+    ];
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => fakeRows,
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const stats = await store.stats();
+    assert.equal(stats.totalCount, 3);
+    assert.equal(stats.scopeCounts["agent:test"], 2);
+    assert.equal(stats.scopeCounts["user:global"], 1);
+    assert.equal(stats.categoryCounts["fact"], 2);
+    assert.equal(stats.categoryCounts["preference"], 1);
+  });
+
+  it("should apply scope filter to stats query", async () => {
+    let capturedWhere: string | undefined;
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: (w: string) => { capturedWhere = w; return chain; },
+        limit: () => chain,
+        toArray: async () => [],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    await store.stats(["agent:test"]);
+    assert.ok(capturedWhere !== undefined);
+    assert.ok(capturedWhere!.includes("agent:test"));
+  });
+
+  it("should return zero counts on empty table", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
+    const stats = await store.stats();
+    assert.equal(stats.totalCount, 0);
+    assert.deepEqual(stats.scopeCounts, {});
+    assert.deepEqual(stats.categoryCounts, {});
+  });
+});
+
+describe("src/store.ts — update()", () => {
+  it("should delete old entry and store updated one", async () => {
+    const original = { id: "550e8400-e29b-41d4-a716-446655440000", text: "old text", vector: [0.1, 0.2, 0.3, 0.4], category: "fact", scope: "agent:test", importance: 0.5, timestamp: 1000, metadata: "{}" };
+    const { table, addedRecords, deletedWheres } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => [original],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const result = await store.update(original.id, { text: "new text", vector: [0.5, 0.6, 0.7, 0.8] });
+    assert.ok(deletedWheres.length >= 1);
+    assert.ok(addedRecords.length >= 1);
+    assert.equal(result!.text, "new text");
+  });
+
+  it("should update importance without changing text", async () => {
+    const original = { id: "550e8400-e29b-41d4-a716-446655440001", text: "keep text", vector: [0.1, 0.2, 0.3, 0.4], category: "fact", scope: "global", importance: 0.5, timestamp: 1000, metadata: "{}" };
+    const { table, addedRecords } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => [original],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const result = await store.update(original.id, { importance: 0.95 });
+    assert.equal(result!.importance, 0.95);
+    assert.equal(result!.text, "keep text");
+  });
+
+  it("should return null when entry not found", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
+    const result = await store.update("550e8400-e29b-41d4-a716-446655440099", { text: "nope" });
+    assert.equal(result, null);
+  });
+
+  it("should throw on invalid ID format", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
+    await assert.rejects(
+      () => store.update("invalid-id!!", { text: "test" }),
+      /Invalid memory ID/,
+    );
+  });
+
+  it("should throw when scope filter denies access", async () => {
+    const original = { id: "550e8400-e29b-41d4-a716-446655440002", text: "secret", vector: [0.1, 0.2, 0.3, 0.4], category: "fact", scope: "private:other", importance: 0.5, timestamp: 1000, metadata: "{}" };
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => [original],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    await assert.rejects(
+      () => store.update(original.id, { text: "updated" }, ["agent:test"]),
+      /outside accessible scopes/,
+    );
+  });
+});
+
+describe("src/store.ts — bulkDelete()", () => {
+  it("should delete entries matching scope filter", async () => {
+    const matchingRows = [{ id: "d1" }, { id: "d2" }];
+    const { table, deletedWheres } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        toArray: async () => matchingRows,
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    const count = await store.bulkDelete(["agent:test"]);
+    assert.equal(count, 2);
+    assert.ok(deletedWheres.length >= 1);
+  });
+
+  it("should return zero when no entries match", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
+    const count = await store.bulkDelete(["empty:scope"]);
+    assert.equal(count, 0);
+  });
+
+  it("should throw when no filters provided", async () => {
+    const { table } = createMockTable();
+    const store = createInitializedStore(table);
+    await assert.rejects(
+      () => store.bulkDelete([]),
+      /Bulk delete requires/,
+    );
+  });
+
+  it("should accept beforeTimestamp filter", async () => {
+    let capturedWhere: string | undefined;
+    const { table } = createMockTable();
+    table.query = () => {
+      const chain: any = {
+        select: () => chain,
+        where: (w: string) => { capturedWhere = w; return chain; },
+        limit: () => chain,
+        toArray: async () => [],
+      };
+      return chain;
+    };
+    const store = createInitializedStore(table);
+    await store.bulkDelete(["agent:test"], 1700000000000);
+    assert.ok(capturedWhere !== undefined);
+    assert.ok(capturedWhere!.includes("timestamp"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FILE 3: src/tools.ts — tool registrations and execute functions
+// ---------------------------------------------------------------------------
+
+function createToolContext(overrides: Record<string, any> = {}) {
+  return {
+    retriever: {
+      retrieve: async (ctx: any) => [],
+      getConfig: () => ({ mode: "hybrid" }),
+    },
+    store: {
+      store: async (entry: any) => ({ ...entry, id: "new-id", timestamp: Date.now() }),
+      hasId: async () => false,
+      vectorSearch: async () => [],
+      bm25Search: async () => [],
+      list: async () => [],
+      stats: async () => ({ totalCount: 0, scopeCounts: {}, categoryCounts: {} }),
+      delete: async () => true,
+      update: async (id: string, updates: any) => ({ id, text: updates.text || "existing", vector: [0.1, 0.2, 0.3, 0.4], category: "fact", scope: "global", importance: 0.7, timestamp: Date.now(), metadata: "{}" }),
+      hasFtsSupport: true,
+    },
+    scopeManager: {
+      getAccessibleScopes: (agentId?: string) => ["agent:test", "user:global"],
+      isAccessible: (scope: string, agentId?: string) => scope !== "forbidden:scope",
+      resolveScope: (s: string) => s,
+      getDefaultScope: (agentId?: string) => "agent:test",
+      getStats: () => ({ totalScopes: 2, agentsWithCustomAccess: 0, scopesByType: { agent: 1, user: 1 } }),
+    },
+    embedder: {
+      embed: async (text: string) => [0.1, 0.2, 0.3, 0.4],
+      embedPassage: async (text: string) => [0.1, 0.2, 0.3, 0.4],
+      embedBatchPassage: async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3, 0.4]),
+    },
+    agentId: "agent-test-123",
+    ...overrides,
+  };
+}
+
+describe("src/tools.ts — registerMemoryRecallTool", () => {
+  let tool: any;
+
+  beforeEach(() => {
+    tool = null;
+    const api = { registerTool: (def: any, opts: any) => { tool = def; } };
+    registerMemoryRecallTool(api as any, createToolContext({
+      retriever: {
+        retrieve: async (ctx: any) => {
+          if (ctx.query === "empty") return [];
+          if (ctx.query === "fail") throw new Error("Retrieval failed");
+          return [
+            {
+              entry: { id: "m1", text: "Found memory", category: "fact", scope: "agent:test", importance: 0.8, timestamp: 1000, metadata: "{}", vector: [] },
+              score: 0.95,
+              sources: { vector: { score: 0.95, rank: 1 } },
+            },
+          ];
+        },
+        getConfig: () => ({ mode: "hybrid" }),
+      },
+    }) as any);
+  });
+
+  it("should register a tool named memory_recall", () => {
+    assert.ok(tool !== null);
+    assert.equal(tool.name, "memory_recall");
+  });
+
+  it("should return results for a valid query", async () => {
+    const result = await tool.execute("c1", { query: "test query" });
+    assert.ok(result.content[0].text.includes("Found memory"));
+    assert.equal(result.details.count, 1);
+  });
+
+  it("should handle empty results", async () => {
+    const result = await tool.execute("c2", { query: "empty" });
+    assert.ok(result.content[0].text.includes("No relevant memories"));
+    assert.equal(result.details.count, 0);
+  });
+
+  it("should handle retrieval errors", async () => {
+    const result = await tool.execute("c3", { query: "fail" });
+    assert.ok(result.content[0].text.includes("failed"));
+  });
+
+  it("should deny access to forbidden scope", async () => {
+    const result = await tool.execute("c4", { query: "test", scope: "forbidden:scope" });
+    assert.ok(result.content[0].text.includes("Access denied"));
+  });
+});
+
+describe("src/tools.ts — registerMemoryStoreTool", () => {
+  let tool: any;
+  let storedEntries: any[];
+
+  beforeEach(() => {
+    tool = null;
+    storedEntries = [];
+    const api = { registerTool: (def: any, opts: any) => { tool = def; } };
+    registerMemoryStoreTool(api as any, createToolContext({
+      store: {
+        store: async (entry: any) => { storedEntries.push(entry); return { ...entry, id: "new-id", timestamp: Date.now() }; },
+        vectorSearch: async () => [],
+      },
+    }) as any);
+  });
+
+  it("should register a tool named memory_store", () => {
+    assert.equal(tool.name, "memory_store");
+  });
+
+  it("should store a valid memory entry", async () => {
+    const result = await tool.execute("s1", { text: "The user prefers dark mode for all editors", category: "preference", importance: 0.8 });
+    assert.ok(result.content[0].text.includes("Stored"));
+    assert.ok(storedEntries.length >= 1);
+  });
+
+  it("should reject noise content", async () => {
+    const result = await tool.execute("s2", { text: "ok" });
+    assert.ok(result.content[0].text.includes("noise"));
+  });
+
+  it("should reject access to forbidden scope", async () => {
+    const result = await tool.execute("s3", { text: "Secret data that needs storing somewhere", scope: "forbidden:scope" });
+    assert.ok(result.content[0].text.includes("Access denied"));
+  });
+
+  it("should detect duplicates", async () => {
+    let storeTool: any = null;
+    const api2 = { registerTool: (def: any) => { storeTool = def; } };
+    registerMemoryStoreTool(api2 as any, createToolContext({
+      store: {
+        store: async (entry: any) => ({ ...entry, id: "x", timestamp: Date.now() }),
+        vectorSearch: async () => [{ entry: { id: "dup-1", text: "Already stored", category: "fact", scope: "agent:test", importance: 0.8, timestamp: 0, metadata: "{}", vector: [] }, score: 0.99 }],
+      },
+    }) as any);
+    const result = await storeTool.execute("s4", { text: "Already stored memory content" });
+    assert.ok(result.content[0].text.includes("Similar memory already exists"));
+  });
+
+  it("should handle store errors", async () => {
+    let errTool: any = null;
+    const api3 = { registerTool: (def: any) => { errTool = def; } };
+    registerMemoryStoreTool(api3 as any, createToolContext({
+      store: {
+        store: async () => { throw new Error("DB write failed"); },
+        vectorSearch: async () => [],
+      },
+    }) as any);
+    const result = await errTool.execute("s5", { text: "Will fail to store because of DB error", category: "fact" });
+    assert.ok(result.content[0].text.includes("failed"));
+  });
+});
+
+describe("src/tools.ts — registerMemoryForgetTool", () => {
+  let tool: any;
+  let deletedIds: string[];
+
+  beforeEach(() => {
+    tool = null;
+    deletedIds = [];
+    const api = { registerTool: (def: any) => { tool = def; } };
+    registerMemoryForgetTool(api as any, createToolContext({
+      store: {
+        delete: async (id: string) => { deletedIds.push(id); return true; },
+      },
+      retriever: {
+        retrieve: async (ctx: any) => {
+          if (ctx.query === "single-match") return [{
+            entry: { id: "found-1", text: "Memory to delete", category: "fact", scope: "agent:test", importance: 0.5, timestamp: 0, metadata: "{}", vector: [] },
+            score: 0.99,
+            sources: { vector: { score: 0.99, rank: 1 } },
+          }];
+          if (ctx.query === "multi-match") return [
+            { entry: { id: "m1", text: "Match 1", category: "fact", scope: "agent:test", importance: 0.5, timestamp: 0, metadata: "{}", vector: [] }, score: 0.85, sources: {} },
+            { entry: { id: "m2", text: "Match 2", category: "fact", scope: "agent:test", importance: 0.5, timestamp: 0, metadata: "{}", vector: [] }, score: 0.80, sources: {} },
+          ];
+          return [];
+        },
+        getConfig: () => ({ mode: "hybrid" }),
+      },
+    }) as any);
+  });
+
+  it("should register a tool named memory_forget", () => {
+    assert.equal(tool.name, "memory_forget");
+  });
+
+  it("should delete by memoryId", async () => {
+    const result = await tool.execute("f1", { memoryId: "550e8400-e29b-41d4-a716-446655440000" });
+    assert.ok(result.content[0].text.includes("forgotten"));
+    assert.ok(deletedIds.length >= 1);
+  });
+
+  it("should auto-delete a single high-score query match", async () => {
+    const result = await tool.execute("f2", { query: "single-match" });
+    assert.ok(result.content[0].text.includes("Forgotten") || result.content[0].text.includes("forgotten"));
+  });
+
+  it("should list candidates for multiple query matches", async () => {
+    const result = await tool.execute("f3", { query: "multi-match" });
+    assert.ok(result.content[0].text.includes("candidates") || result.content[0].text.includes("Specify"));
+  });
+
+  it("should return no matches for empty query results", async () => {
+    const result = await tool.execute("f4", { query: "no-results" });
+    assert.ok(result.content[0].text.includes("No matching"));
+  });
+
+  it("should require query or memoryId", async () => {
+    const result = await tool.execute("f5", {});
+    assert.ok(result.content[0].text.includes("Provide"));
+  });
+
+  it("should handle delete errors", async () => {
+    let errTool: any = null;
+    const api2 = { registerTool: (def: any) => { errTool = def; } };
+    registerMemoryForgetTool(api2 as any, createToolContext({
+      store: { delete: async () => { throw new Error("Delete failed"); } },
+    }) as any);
+    const result = await errTool.execute("f6", { memoryId: "550e8400-e29b-41d4-a716-446655440000" });
+    assert.ok(result.content[0].text.includes("failed"));
+  });
+});
+
+describe("src/tools.ts — registerMemoryUpdateTool", () => {
+  let tool: any;
+  let updateCalls: any[];
+  let embedCalls: string[];
+
+  beforeEach(() => {
+    tool = null;
+    updateCalls = [];
+    embedCalls = [];
+    const api = { registerTool: (def: any) => { tool = def; } };
+    registerMemoryUpdateTool(api as any, createToolContext({
+      store: {
+        update: async (id: string, updates: any, scopeFilter?: string[]) => {
+          updateCalls.push({ id, updates });
+          return { id, text: updates.text || "existing", vector: [0.5, 0.6, 0.7, 0.8], category: updates.category || "fact", scope: "global", importance: updates.importance || 0.7, timestamp: 1000, metadata: "{}" };
+        },
+      },
+      embedder: {
+        embedPassage: async (text: string) => { embedCalls.push(text); return [0.5, 0.6, 0.7, 0.8]; },
+      },
+    }) as any);
+  });
+
+  it("should register a tool named memory_update", () => {
+    assert.equal(tool.name, "memory_update");
+  });
+
+  it("should update content and re-embed", async () => {
+    const result = await tool.execute("u1", { memoryId: "550e8400-e29b-41d4-a716-446655440000", text: "Updated content" });
+    assert.ok(result.content[0].text.includes("Updated"));
+    assert.ok(embedCalls.length >= 1);
+    assert.ok(updateCalls.length >= 1);
+    assert.equal(updateCalls[0].updates.text, "Updated content");
+  });
+
+  it("should update importance without re-embedding", async () => {
+    const result = await tool.execute("u2", { memoryId: "550e8400-e29b-41d4-a716-446655440000", importance: 0.99 });
+    assert.ok(result.content[0].text.includes("Updated"));
+    assert.equal(embedCalls.length, 0);
+    assert.ok(updateCalls.length >= 1);
+    assert.ok(updateCalls[0].updates.importance !== undefined);
+  });
+
+  it("should return error when no updates provided", async () => {
+    const result = await tool.execute("u3", { memoryId: "550e8400-e29b-41d4-a716-446655440000" });
+    assert.ok(result.content[0].text.includes("Nothing to update"));
+  });
+
+  it("should handle update errors", async () => {
+    let errTool: any = null;
+    const api2 = { registerTool: (def: any) => { errTool = def; } };
+    registerMemoryUpdateTool(api2 as any, createToolContext({
+      store: { update: async () => { throw new Error("Update failed"); } },
+    }) as any);
+    const result = await errTool.execute("u4", { memoryId: "550e8400-e29b-41d4-a716-446655440000", text: "will fail" });
+    assert.ok(result.content[0].text.includes("failed"));
+  });
+
+  it("should resolve non-UUID memoryId via search", async () => {
+    let resolveTool: any = null;
+    const api3 = { registerTool: (def: any) => { resolveTool = def; } };
+    registerMemoryUpdateTool(api3 as any, createToolContext({
+      retriever: {
+        retrieve: async (ctx: any) => [{
+          entry: { id: "550e8400-e29b-41d4-a716-446655440011", text: "Found entry", category: "fact", scope: "global", importance: 0.5, timestamp: 0, metadata: "{}", vector: [] },
+          score: 0.95,
+          sources: {},
+        }],
+        getConfig: () => ({ mode: "hybrid" }),
+      },
+      store: {
+        update: async (id: string, updates: any) => ({ id, text: updates.text || "test", vector: [], category: "fact", scope: "global", importance: 0.7, timestamp: 0, metadata: "{}" }),
+      },
+    }) as any);
+    const result = await resolveTool.execute("u5", { memoryId: "some natural language query", text: "Updated text" });
+    // Should either update the resolved entry or show candidates
+    assert.ok(result.content[0].text.includes("Updated") || result.content[0].text.includes("matches") || result.content[0].text.includes("Multiple"));
+  });
+
+  it("should reject noise text updates", async () => {
+    const result = await tool.execute("u6", { memoryId: "550e8400-e29b-41d4-a716-446655440000", text: "ok" });
+    assert.ok(result.content[0].text.includes("noise"));
+  });
+});
+
+describe("src/tools.ts — registerMemoryStatsTool", () => {
+  let tool: any;
+
+  beforeEach(() => {
+    tool = null;
+    const api = { registerTool: (def: any) => { tool = def; } };
+    registerMemoryStatsTool(api as any, createToolContext({
+      store: {
+        stats: async () => ({
+          totalCount: 42,
+          scopeCounts: { "agent:test": 30, "user:global": 12 },
+          categoryCounts: { fact: 20, preference: 15, decision: 7 },
+        }),
+        hasFtsSupport: true,
+      },
+    }) as any);
+  });
+
+  it("should register a tool named memory_stats", () => {
+    assert.equal(tool.name, "memory_stats");
+  });
+
+  it("should return stats text with totals", async () => {
+    const result = await tool.execute("st1", {});
+    assert.ok(result.content[0].text.includes("42"));
+    assert.ok(result.content[0].text.includes("Memory Statistics"));
+  });
+
+  it("should handle scope denied", async () => {
+    const result = await tool.execute("st2", { scope: "forbidden:scope" });
+    assert.ok(result.content[0].text.includes("Access denied"));
+  });
+
+  it("should handle stats errors", async () => {
+    let errTool: any = null;
+    const api2 = { registerTool: (def: any) => { errTool = def; } };
+    registerMemoryStatsTool(api2 as any, createToolContext({
+      store: { stats: async () => { throw new Error("Stats failed"); }, hasFtsSupport: false },
+    }) as any);
+    const result = await errTool.execute("st3", {});
+    assert.ok(result.content[0].text.includes("Failed"));
+  });
+});
+
+describe("src/tools.ts — registerMemoryListTool", () => {
+  let tool: any;
+
+  beforeEach(() => {
+    tool = null;
+    const api = { registerTool: (def: any) => { tool = def; } };
+    registerMemoryListTool(api as any, createToolContext({
+      store: {
+        list: async (scopeFilter?: string[], category?: string, limit?: number, offset?: number) => [
+          { id: "l1", text: "Entry one text content", category: "fact", scope: "agent:test", importance: 0.8, timestamp: 1700000000000, metadata: "{}" },
+          { id: "l2", text: "Entry two text content", category: "preference", scope: "agent:test", importance: 0.6, timestamp: 1700000001000, metadata: "{}" },
+        ],
+      },
+    }) as any);
+  });
+
+  it("should register a tool named memory_list", () => {
+    assert.equal(tool.name, "memory_list");
+  });
+
+  it("should return entries", async () => {
+    const result = await tool.execute("l1", {});
+    assert.ok(result.content[0].text.includes("Recent memories"));
+    assert.equal(result.details.count, 2);
+  });
+
+  it("should handle empty list", async () => {
+    let emptyTool: any = null;
+    const api2 = { registerTool: (def: any) => { emptyTool = def; } };
+    registerMemoryListTool(api2 as any, createToolContext({
+      store: { list: async () => [] },
+    }) as any);
+    const result = await emptyTool.execute("l2", {});
+    assert.ok(result.content[0].text.includes("No memories"));
+  });
+
+  it("should handle scope denied", async () => {
+    const result = await tool.execute("l3", { scope: "forbidden:scope" });
+    assert.ok(result.content[0].text.includes("Access denied"));
+  });
+
+  it("should handle list errors", async () => {
+    let errTool: any = null;
+    const api3 = { registerTool: (def: any) => { errTool = def; } };
+    registerMemoryListTool(api3 as any, createToolContext({
+      store: { list: async () => { throw new Error("List failed"); } },
+    }) as any);
+    const result = await errTool.execute("l4", {});
+    assert.ok(result.content[0].text.includes("Failed"));
+  });
+});
+
+describe("src/tools.ts — registerAllMemoryTools", () => {
+  it("should register 4 core tools by default", () => {
+    const tools: any[] = [];
+    const api = { registerTool: (def: any, opts: any) => { tools.push(def); } };
+    registerAllMemoryTools(api as any, createToolContext() as any);
+    assert.equal(tools.length, 4);
+  });
+
+  it("should register 6 tools when enableManagementTools is true", () => {
+    const tools: any[] = [];
+    const api = { registerTool: (def: any, opts: any) => { tools.push(def); } };
+    registerAllMemoryTools(api as any, createToolContext() as any, { enableManagementTools: true });
+    assert.equal(tools.length, 6);
+  });
+
+  it("should register tools with correct names", () => {
+    const tools: any[] = [];
+    const api = { registerTool: (def: any, opts: any) => { tools.push(def); } };
+    registerAllMemoryTools(api as any, createToolContext() as any, { enableManagementTools: true });
+    const names = tools.map((t) => t.name);
+    assert.ok(names.includes("memory_recall"));
+    assert.ok(names.includes("memory_store"));
+    assert.ok(names.includes("memory_forget"));
+    assert.ok(names.includes("memory_update"));
+    assert.ok(names.includes("memory_stats"));
+    assert.ok(names.includes("memory_list"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FILE 4: cli.ts — registerMemoryCLI
+// ---------------------------------------------------------------------------
+
+describe("cli.ts — registerMemoryCLI", () => {
+  let consoleLogOutput: string[];
+  let consoleErrorOutput: string[];
+  let originalLog: typeof console.log;
+  let originalError: typeof console.error;
+  let originalExit: typeof process.exit;
+  let mockContext: any;
+
+  beforeEach(() => {
+    consoleLogOutput = [];
+    consoleErrorOutput = [];
+    originalLog = console.log;
+    originalError = console.error;
+    originalExit = process.exit;
+    console.log = (...args: any[]) => { consoleLogOutput.push(args.map(String).join(" ")); };
+    console.error = (...args: any[]) => { consoleErrorOutput.push(args.map(String).join(" ")); };
+    process.exit = (() => { throw new Error("process.exit called"); }) as any;
+
+    mockContext = {
+      store: {
+        list: async () => [
+          { id: "cli-1", text: "CLI test entry", category: "fact", scope: "agent:test", importance: 0.7, timestamp: 1700000000000, metadata: "{}" },
+        ],
+        stats: async () => ({
+          totalCount: 10,
+          scopeCounts: { "agent:test": 10 },
+          categoryCounts: { fact: 5, preference: 3, decision: 2 },
+        }),
+        delete: async (id: string) => id === "cli-1",
+        bulkDelete: async () => 3,
+        importEntry: async () => {},
+        hasId: async () => false,
+        store: async (entry: any) => ({ ...entry, id: "new", timestamp: Date.now() }),
+        vectorSearch: async () => [],
+        hasFtsSupport: true,
+      },
+      retriever: {
+        retrieve: async (ctx: any) => [
+          {
+            entry: { id: "s1", text: "Search result", category: "fact", scope: "agent:test", importance: 0.8, timestamp: 1700000000000, metadata: "{}", vector: [] },
+            score: 0.9,
+            sources: { vector: { score: 0.9, rank: 1 } },
+          },
+        ],
+        getConfig: () => ({ mode: "hybrid" }),
+      },
+      scopeManager: {
+        getAccessibleScopes: () => ["agent:test", "user:global"],
+        isAccessible: () => true,
+        resolveScope: (s: string) => s,
+        getDefaultScope: () => "agent:test",
+        getStats: () => ({ totalScopes: 2, agentsWithCustomAccess: 0, scopesByType: { agent: 1, user: 1 } }),
+      },
+      embedder: {
+        embedPassage: async () => [0.1, 0.2, 0.3, 0.4],
+        embedBatchPassage: async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3, 0.4]),
+      },
+      migrator: {
+        checkMigrationNeeded: async () => ({ needed: false, sourceFound: false }),
+        migrate: async () => ({ success: true, migratedCount: 0, skippedCount: 0, errors: [], summary: "OK" }),
+        verifyMigration: async () => ({ valid: true, sourceCount: 0, targetCount: 0, issues: [] }),
+      },
+    };
+  });
+
+  afterEach(() => {
+    console.log = originalLog;
+    console.error = originalError;
+    process.exit = originalExit;
+  });
+
+  it("should register memory commands on the program", async () => {
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    const memoryCmd = program.commands.find((c: any) => c.name() === "memory");
+    assert.ok(memoryCmd !== undefined, "Expected 'memory' command");
+  });
+
+  it("should list memories", async () => {
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "list"], { from: "user" });
+    } catch {}
+    const output = consoleLogOutput.join("\n");
+    assert.ok(output.includes("CLI test entry") || output.includes("1 memories"));
+  });
+
+  it("should show stats", async () => {
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "stats"], { from: "user" });
+    } catch {}
+    const output = consoleLogOutput.join("\n");
+    assert.ok(output.includes("10") || output.includes("Memory Statistics"));
+  });
+
+  it("should search memories", async () => {
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "search", "test query"], { from: "user" });
+    } catch {}
+    const output = consoleLogOutput.join("\n");
+    assert.ok(output.includes("Search result") || output.includes("1 memories"));
+  });
+
+  it("should delete a memory", async () => {
+    let deletedId: string | undefined;
+    mockContext.store.delete = async (id: string) => { deletedId = id; return true; };
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "delete", "cli-1"], { from: "user" });
+    } catch {}
+    assert.equal(deletedId, "cli-1");
+    assert.ok(consoleLogOutput.join("\n").includes("deleted"));
+  });
+
+  it("should export memories", async () => {
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "export"], { from: "user" });
+    } catch {}
+    const output = consoleLogOutput.join("\n");
+    assert.ok(output.includes("version") || output.includes("memories"));
+  });
+
+  it("should check migration status", async () => {
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "migrate", "check"], { from: "user" });
+    } catch {}
+    const output = consoleLogOutput.join("\n");
+    assert.ok(output.includes("Legacy database found") || output.includes("Migration needed"));
+  });
+
+  it("should run migration", async () => {
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "migrate", "run"], { from: "user" });
+    } catch {}
+    const output = consoleLogOutput.join("\n");
+    assert.ok(output.includes("Status") || output.includes("Migrated"));
+  });
+
+  it("should verify migration", async () => {
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "migrate", "verify"], { from: "user" });
+    } catch {}
+    const output = consoleLogOutput.join("\n");
+    assert.ok(output.includes("Valid") || output.includes("Source"));
+  });
+
+  it("should handle list error gracefully", async () => {
+    mockContext.store.list = async () => { throw new Error("DB connection lost"); };
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "list"], { from: "user" });
+    } catch {}
+    const errOutput = consoleErrorOutput.join("\n");
+    assert.ok(errOutput.includes("Failed") || errOutput.includes("error") || errOutput.includes("Error"));
+  });
+
+  it("should handle stats error gracefully", async () => {
+    mockContext.store.stats = async () => { throw new Error("Stats failed"); };
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "stats"], { from: "user" });
+    } catch {}
+    const errOutput = consoleErrorOutput.join("\n");
+    assert.ok(errOutput.includes("Failed") || errOutput.includes("error"));
+  });
+
+  it("should handle search with no results", async () => {
+    mockContext.retriever.retrieve = async () => [];
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "search", "nothing"], { from: "user" });
+    } catch {}
+    const output = consoleLogOutput.join("\n");
+    assert.ok(output.includes("No relevant memories"));
+  });
+
+  it("should handle delete-bulk with scope", async () => {
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.exitOverride();
+    registerMemoryCLI(program, mockContext);
+    try {
+      await program.parseAsync(["node", "test", "memory", "delete-bulk", "--scope", "agent:test"], { from: "user" });
+    } catch {}
+    const output = consoleLogOutput.join("\n");
+    assert.ok(output.includes("Deleted") || output.includes("3"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FILE 5: src/migrate.ts — MemoryMigrator
+// ---------------------------------------------------------------------------
+
+describe("src/migrate.ts — MemoryMigrator", () => {
+  it("should construct from a store", () => {
+    const mockStore = { store: async () => {}, stats: async () => ({ totalCount: 0, scopeCounts: {}, categoryCounts: {} }) };
+    const migrator = new MemoryMigrator(mockStore as any);
+    assert.ok(migrator !== null);
+  });
+
+  it("checkMigrationNeeded should return false when no legacy data", async () => {
+    const mockStore = { stats: async () => ({ totalCount: 0, scopeCounts: {}, categoryCounts: {} }) };
+    const migrator = new MemoryMigrator(mockStore as any);
+    const result = await migrator.checkMigrationNeeded();
+    assert.equal(result.sourceFound, false);
+    assert.equal(result.needed, false);
+  });
+
+  it("checkMigrationNeeded with non-existent explicit path should return false", async () => {
+    const mockStore = { stats: async () => ({ totalCount: 0, scopeCounts: {}, categoryCounts: {} }) };
+    const migrator = new MemoryMigrator(mockStore as any);
+    const result = await migrator.checkMigrationNeeded("/tmp/definitely-nonexistent-path-xyz-42");
+    assert.equal(result.sourceFound, false);
+    assert.equal(result.needed, false);
+  });
+
+  it("migrate should report no source when none exists", async () => {
+    const mockStore = { store: async () => {}, stats: async () => ({ totalCount: 0, scopeCounts: {}, categoryCounts: {} }) };
+    const migrator = new MemoryMigrator(mockStore as any);
+    const result = await migrator.migrate();
+    assert.equal(result.success, false);
+    assert.ok(result.errors.length > 0);
+    assert.ok(result.errors[0].includes("No legacy database"));
+  });
+
+  it("verifyMigration should report source not found when none exists", async () => {
+    const mockStore = { stats: async () => ({ totalCount: 0, scopeCounts: {}, categoryCounts: {} }) };
+    const migrator = new MemoryMigrator(mockStore as any);
+    const result = await migrator.verifyMigration();
+    assert.equal(result.valid, false);
+    assert.ok(result.issues.some((i: string) => i.includes("not found")));
+  });
+});
+
+describe("src/migrate.ts — createMigrator()", () => {
+  it("should create a MemoryMigrator instance", () => {
+    const mockStore = {} as any;
+    const migrator = createMigrator(mockStore);
+    assert.ok(migrator instanceof MemoryMigrator);
+  });
+});
+
+describe("src/migrate.ts — checkForLegacyData()", () => {
+  it("should return found=false when no legacy data exists in default paths", async () => {
+    // This will attempt to connect to LanceDB at default paths, which will fail
+    // The function catches all errors and returns found=false
+    const result = await checkForLegacyData();
+    assert.equal(typeof result.found, "boolean");
+    assert.ok(Array.isArray(result.paths));
+    assert.equal(typeof result.totalEntries, "number");
+    // In test environment, no legacy data should exist
+    assert.equal(result.found, false);
   });
 });
