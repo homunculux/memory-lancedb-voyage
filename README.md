@@ -1,5 +1,8 @@
 # Vidya 🧠
 
+[![CI](https://github.com/AkashaHQ/Vidya/actions/workflows/ci.yml/badge.svg)](https://github.com/AkashaHQ/Vidya/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/AkashaHQ/Vidya/graph/badge.svg)](https://codecov.io/gh/AkashaHQ/Vidya)
+
 **Hybrid Memory for OpenClaw Agents**
 
 > *विद्या (Vidya) — Sanskrit for "knowledge"*
