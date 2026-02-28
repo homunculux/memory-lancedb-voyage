@@ -17,7 +17,7 @@ interface CLIContext {
   retriever: MemoryRetriever;
   scopeManager: MemoryScopeManager;
   migrator: MemoryMigrator;
-  embedder?: import("./src/embedder.js").Embedder;
+  embedder?: import("./src/embedder-interface.js").IEmbedder;
 }
 
 // ============================================================================

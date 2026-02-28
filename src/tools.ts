@@ -9,7 +9,7 @@ import type { MemoryRetriever, RetrievalResult } from "./retriever.js";
 import type { MemoryStore } from "./store.js";
 import { isNoise } from "./noise-filter.js";
 import type { MemoryScopeManager } from "./scopes.js";
-import type { Embedder } from "./embedder.js";
+import type { IEmbedder } from "./embedder-interface.js";
 
 // ============================================================================
 // Types
@@ -21,7 +21,7 @@ interface ToolContext {
   retriever: MemoryRetriever;
   store: MemoryStore;
   scopeManager: MemoryScopeManager;
-  embedder: Embedder;
+  embedder: IEmbedder;
   agentId?: string;
 }
 

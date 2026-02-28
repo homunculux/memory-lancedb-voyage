@@ -4,7 +4,7 @@
  */
 
 import type { MemoryStore, MemorySearchResult } from "./store.js";
-import type { Embedder } from "./embedder.js";
+import type { IEmbedder } from "./embedder-interface.js";
 import { filterNoise } from "./noise-filter.js";
 
 // ============================================================================
@@ -101,7 +101,7 @@ const VOYAGE_RERANK_URL = "https://api.voyageai.com/v1/rerank";
 export class MemoryRetriever {
   constructor(
     private store: MemoryStore,
-    private embedder: Embedder,
+    private embedder: IEmbedder,
     private config: RetrievalConfig = DEFAULT_RETRIEVAL_CONFIG,
     private voyageApiKey?: string,
   ) {}
@@ -425,7 +425,7 @@ export class MemoryRetriever {
 
 export function createRetriever(
   store: MemoryStore,
-  embedder: Embedder,
+  embedder: IEmbedder,
   config?: Partial<RetrievalConfig>,
   voyageApiKey?: string,
 ): MemoryRetriever {
