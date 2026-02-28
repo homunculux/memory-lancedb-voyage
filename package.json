@@ -34,7 +34,7 @@
   "devDependencies": {
     "c8": "^11.0.0",
     "typescript": "^5.9.3",
-    "jiti": "^2.4.2"
+    "tsx": "^4.19.0"
   },
   "types": "dist/index.d.ts",
   "files": [
@@ -45,7 +45,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "node --import jiti/register node_modules/.bin/c8 --reporter=text --reporter=lcov node --test tests/unit/**/*.test.ts"
+    "test": "npx c8 --reporter=text --reporter=lcov npx tsx --test test/unit.test.ts"
   },
   "exports": {
     ".": {
