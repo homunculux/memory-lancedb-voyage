@@ -45,7 +45,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "npx c8 --reporter=text --reporter=lcov npx tsx --test test/unit.test.ts"
+    "test": "npx c8 --reporter=text --reporter=lcov npx tsx --test test/unit.test.ts",
+    "prepublishOnly": "tsc"
   },
   "exports": {
     ".": {
