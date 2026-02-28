@@ -1,0 +1,22 @@
+name: Security Review
+on:
+  pull_request:
+    types: [opened, synchronize, labeled]
+
+jobs:
+  security:
+    if: contains(github.event.pull_request.labels.*.name, 'security')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+
+      - uses: AkashaHQ/claude-code-security-review@main
+        with:
+          claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          comment-pr: true
