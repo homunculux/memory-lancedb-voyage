@@ -3,7 +3,7 @@
   "version": "2026.2.25",
   "description": "Vidya — Hybrid memory plugin for OpenClaw agents. LanceDB vector store + Voyage AI embedding/rerank + BM25 keyword search.",
   "type": "module",
-  "main": "index.ts",
+  "main": "dist/index.js",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -34,5 +34,17 @@
   "devDependencies": {
     "c8": "^11.0.0",
     "typescript": "^5.9.3"
+  },
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "config.example.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "test": "node --import jiti/register node_modules/.bin/c8 --reporter=text --reporter=lcov node --test tests/unit/**/*.test.ts"
   }
 }
