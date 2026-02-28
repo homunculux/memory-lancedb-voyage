@@ -3,3 +3,4 @@ dist/
 *.lance
 *.idx
 .DS_Store
+dist/
