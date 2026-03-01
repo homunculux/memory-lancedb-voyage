@@ -106,7 +106,7 @@ type LlmMemoryJudgment =
   | { store: false }
   | { store: true; memories: Array<{ text: string; category: string; importance: number }> };
 
-async function callLlmForCaptureJudgment(
+export async function callLlmForCaptureJudgment(
   conversationText: string,
   model: string,
   logger: { info: (msg: string) => void; warn: (msg: string) => void; debug?: (msg: string) => void },
