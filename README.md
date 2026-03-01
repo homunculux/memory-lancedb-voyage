@@ -28,19 +28,29 @@ A memory plugin for [OpenClaw](https://github.com/openclaw/openclaw) that gives 
 
 ### 1. Install
 
-**Option A — npm** (recommended):
+**Option A — OpenClaw CLI** (recommended):
 
 ```bash
-cd ~/.openclaw/plugins
-npm install @akashahq/vidya --prefix memory-lancedb-voyage
+openclaw plugins install @akashahq/vidya
 ```
 
-**Option B — git clone** (for development):
+This handles downloading, placement in `~/.openclaw/extensions/`, and config scaffolding automatically.
+
+**Option B — Manual npm install**:
 
 ```bash
-cd ~/.openclaw/plugins
-git clone https://github.com/AkashaHQ/Vidya.git memory-lancedb-voyage
-cd memory-lancedb-voyage
+cd ~/.openclaw/extensions
+npm install @akashahq/vidya --prefix vidya
+```
+
+> **Important:** The extension must be directly under `~/.openclaw/extensions/`, not nested inside a `node_modules/` subfolder. OpenClaw only scans top-level entries in the extensions directory.
+
+**Option C — git clone** (for development):
+
+```bash
+cd ~/.openclaw/extensions
+git clone https://github.com/AkashaHQ/Vidya.git vidya
+cd vidya
 npm install
 ```
 
@@ -48,14 +58,16 @@ npm install
 
 Add to your `openclaw.json`:
 
+> **Note:** The `plugins.entries` key (`"vidya"` below) must match the `id` field in the plugin's `openclaw.plugin.json` manifest. If these don't match, OpenClaw won't associate the config with the plugin.
+
 ```json
 {
   "plugins": {
     "slots": {
-      "memory": "memory-lancedb-voyage"
+      "memory": "vidya"
     },
     "entries": {
-      "memory-lancedb-voyage": {
+      "vidya": {
         "enabled": true,
         "config": {
           "embedding": {
@@ -273,20 +285,43 @@ Tested with 32 integration tests on production data:
 | Hybrid recall | 100% |
 | Avg retrieval latency | ~400ms |
 
-## Known Issues
+## Troubleshooting
+
+### Plugin Not Found / Tools Don't Appear
+
+If `memory_store`, `memory_recall`, etc. don't show up after installation:
+
+1. **Extension must be directly under `~/.openclaw/extensions/`** — OpenClaw scans `~/.openclaw/extensions/*.ts` and `~/.openclaw/extensions/*/index.ts`. If the plugin is nested inside a `node_modules/` subfolder, it won't be discovered.
+
+2. **Plugin manifest must exist** — Each extension needs an `openclaw.plugin.json` file at its root with a valid `id` field.
+
+3. **Config key must match manifest `id`** — The key in `plugins.entries.<id>` in your `openclaw.json` must exactly match the `id` field in the plugin's `openclaw.plugin.json`. For Vidya, this is `"vidya"`.
+
+4. **Run the doctor** — Use `openclaw plugins doctor` to diagnose plugin loading issues.
 
 ### jiti Cache
 
-OpenClaw loads `.ts` files via jiti. After modifying source files, clear the cache:
+OpenClaw loads `.ts` files via [jiti](https://github.com/unjs/jiti). After modifying `.ts` source files, you must clear the transpilation cache:
 
 ```bash
 rm -rf /tmp/jiti/
 openclaw gateway restart
 ```
 
+Without this, OpenClaw may continue running stale compiled code.
+
 ### Vector Dimension Lock
 
 Once a database is created with a specific embedding model, changing models requires a new `dbPath` or re-embedding all memories via `openclaw memory reembed`.
+
+### Plugin Discovery Order
+
+OpenClaw discovers extensions in this order (first match wins):
+
+1. Paths listed in `plugins.load.paths`
+2. `<workspace>/.openclaw/extensions/*.ts` and `*/index.ts`
+3. `~/.openclaw/extensions/*.ts` and `*/index.ts`
+4. Bundled extensions
 
 ## Dependencies
 
