@@ -28,9 +28,18 @@ A memory plugin for [OpenClaw](https://github.com/openclaw/openclaw) that gives 
 
 ### 1. Install
 
+**Option A — npm** (recommended):
+
 ```bash
 cd ~/.openclaw/plugins
-git clone https://github.com/AKASHA-HQ/Vidya.git memory-lancedb-voyage
+npm install @akashahq/vidya --prefix memory-lancedb-voyage
+```
+
+**Option B — git clone** (for development):
+
+```bash
+cd ~/.openclaw/plugins
+git clone https://github.com/AkashaHQ/Vidya.git memory-lancedb-voyage
 cd memory-lancedb-voyage
 npm install
 ```
