@@ -33,6 +33,7 @@ export interface PluginConfig {
   captureLlm: boolean;
   captureLlmModel: string;
   captureLlmUrl: string;
+  captureLlmApiKey: string;
   enableManagementTools: boolean;
   retrieval: {
     mode: "hybrid" | "vector";
@@ -220,6 +221,11 @@ export const memoryConfigSchema = {
       captureLlmUrl: typeof cfg.captureLlmUrl === "string"
         ? normalizeBaseUrl(cfg.captureLlmUrl)
         : "",
+      captureLlmApiKey: resolveEnvVars(
+        typeof cfg.captureLlmApiKey === "string"
+          ? cfg.captureLlmApiKey
+          : process.env.OPENCLAW_LLM_API_KEY || process.env.OPENAI_API_KEY || "",
+      ),
       enableManagementTools: cfg.enableManagementTools === true,
       retrieval: {
         mode: ret.mode === "vector" ? "vector" : "hybrid",

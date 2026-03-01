@@ -192,6 +192,121 @@ describe("Config Parser (memoryConfigSchema.parse)", () => {
       delete process.env.VOYAGE_API_KEY;
     }
   });
+
+  // captureLlmApiKey tests
+  it("captureLlmApiKey defaults to empty string when no config and no env vars", () => {
+    const saved1 = process.env.OPENCLAW_LLM_API_KEY;
+    const saved2 = process.env.OPENAI_API_KEY;
+    delete process.env.OPENCLAW_LLM_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const cfg = memoryConfigSchema.parse({
+        embedding: { apiKey: "key" },
+      });
+      assert.equal(cfg.captureLlmApiKey, "");
+    } finally {
+      if (saved1 !== undefined) process.env.OPENCLAW_LLM_API_KEY = saved1; else delete process.env.OPENCLAW_LLM_API_KEY;
+      if (saved2 !== undefined) process.env.OPENAI_API_KEY = saved2; else delete process.env.OPENAI_API_KEY;
+    }
+  });
+
+  it("captureLlmApiKey uses config value when provided", () => {
+    const cfg = memoryConfigSchema.parse({
+      embedding: { apiKey: "key" },
+      captureLlmApiKey: "sk-my-llm-key",
+    });
+    assert.equal(cfg.captureLlmApiKey, "sk-my-llm-key");
+  });
+
+  it("captureLlmApiKey supports ${ENV_VAR} resolution", () => {
+    process.env.TEST_CAPTURE_LLM_KEY = "resolved-capture-key";
+    try {
+      const cfg = memoryConfigSchema.parse({
+        embedding: { apiKey: "key" },
+        captureLlmApiKey: "${TEST_CAPTURE_LLM_KEY}",
+      });
+      assert.equal(cfg.captureLlmApiKey, "resolved-capture-key");
+    } finally {
+      delete process.env.TEST_CAPTURE_LLM_KEY;
+    }
+  });
+
+  it("captureLlmApiKey ${ENV_VAR} throws when env var not set", () => {
+    delete process.env.NONEXISTENT_CAPTURE_KEY;
+    assert.throws(
+      () =>
+        memoryConfigSchema.parse({
+          embedding: { apiKey: "key" },
+          captureLlmApiKey: "${NONEXISTENT_CAPTURE_KEY}",
+        }),
+      /Environment variable NONEXISTENT_CAPTURE_KEY is not set/,
+    );
+  });
+
+  it("captureLlmApiKey falls back to OPENCLAW_LLM_API_KEY env var", () => {
+    const saved1 = process.env.OPENCLAW_LLM_API_KEY;
+    const saved2 = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    process.env.OPENCLAW_LLM_API_KEY = "openclaw-llm-key";
+    try {
+      const cfg = memoryConfigSchema.parse({
+        embedding: { apiKey: "key" },
+      });
+      assert.equal(cfg.captureLlmApiKey, "openclaw-llm-key");
+    } finally {
+      if (saved1 !== undefined) process.env.OPENCLAW_LLM_API_KEY = saved1; else delete process.env.OPENCLAW_LLM_API_KEY;
+      if (saved2 !== undefined) process.env.OPENAI_API_KEY = saved2; else delete process.env.OPENAI_API_KEY;
+    }
+  });
+
+  it("captureLlmApiKey falls back to OPENAI_API_KEY env var", () => {
+    const saved1 = process.env.OPENCLAW_LLM_API_KEY;
+    const saved2 = process.env.OPENAI_API_KEY;
+    delete process.env.OPENCLAW_LLM_API_KEY;
+    process.env.OPENAI_API_KEY = "openai-fallback-key";
+    try {
+      const cfg = memoryConfigSchema.parse({
+        embedding: { apiKey: "key" },
+      });
+      assert.equal(cfg.captureLlmApiKey, "openai-fallback-key");
+    } finally {
+      if (saved1 !== undefined) process.env.OPENCLAW_LLM_API_KEY = saved1; else delete process.env.OPENCLAW_LLM_API_KEY;
+      if (saved2 !== undefined) process.env.OPENAI_API_KEY = saved2; else delete process.env.OPENAI_API_KEY;
+    }
+  });
+
+  it("captureLlmApiKey: OPENCLAW_LLM_API_KEY takes priority over OPENAI_API_KEY", () => {
+    const saved1 = process.env.OPENCLAW_LLM_API_KEY;
+    const saved2 = process.env.OPENAI_API_KEY;
+    process.env.OPENCLAW_LLM_API_KEY = "openclaw-wins";
+    process.env.OPENAI_API_KEY = "openai-loses";
+    try {
+      const cfg = memoryConfigSchema.parse({
+        embedding: { apiKey: "key" },
+      });
+      assert.equal(cfg.captureLlmApiKey, "openclaw-wins");
+    } finally {
+      if (saved1 !== undefined) process.env.OPENCLAW_LLM_API_KEY = saved1; else delete process.env.OPENCLAW_LLM_API_KEY;
+      if (saved2 !== undefined) process.env.OPENAI_API_KEY = saved2; else delete process.env.OPENAI_API_KEY;
+    }
+  });
+
+  it("captureLlmApiKey: explicit config value overrides env vars", () => {
+    const saved1 = process.env.OPENCLAW_LLM_API_KEY;
+    const saved2 = process.env.OPENAI_API_KEY;
+    process.env.OPENCLAW_LLM_API_KEY = "env-key";
+    process.env.OPENAI_API_KEY = "env-key-2";
+    try {
+      const cfg = memoryConfigSchema.parse({
+        embedding: { apiKey: "key" },
+        captureLlmApiKey: "explicit-key-wins",
+      });
+      assert.equal(cfg.captureLlmApiKey, "explicit-key-wins");
+    } finally {
+      if (saved1 !== undefined) process.env.OPENCLAW_LLM_API_KEY = saved1; else delete process.env.OPENCLAW_LLM_API_KEY;
+      if (saved2 !== undefined) process.env.OPENAI_API_KEY = saved2; else delete process.env.OPENAI_API_KEY;
+    }
+  });
 });
 
 // ============================================================================

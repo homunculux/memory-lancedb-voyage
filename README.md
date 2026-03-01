@@ -93,7 +93,7 @@ See [`config.example.json`](config.example.json) for all available options.
 |---------|-------------|-------------|
 | `embedding` | `provider`, `apiKey`, `model`, `dimensions`, `baseUrl` | Embedding provider and model. See [Embedding Providers](#embedding-providers) below |
 | `retrieval` | `mode`, `rerank`, `minScore`, `hardMinScore` | `hybrid` (vector+BM25) or `vector` only. Rerank: `cross-encoder`, `lightweight`, or `none` |
-| `autoCapture` | `captureLlm`, `captureLlmModel`, `captureLlmUrl` | LLM judges capture-worthiness. Set `captureLlmUrl` for custom endpoint. Falls back to heuristic if LLM unavailable |
+| `autoCapture` | `captureLlm`, `captureLlmModel`, `captureLlmUrl`, `captureLlmApiKey` | LLM judges capture-worthiness. Set `captureLlmUrl` for custom endpoint, `captureLlmApiKey` for auth. Falls back to heuristic if LLM unavailable |
 | `scopes` | `default`, `definitions`, `agentAccess` | Memory isolation. Define scopes and restrict agent access |
 | `sessionMemory` | `enabled`, `messageCount` | Store session summaries on `/new` command |
 | `enableManagementTools` | — | Enables `memory_stats` and `memory_list` tools |
@@ -162,13 +162,16 @@ Vidya can automatically capture important information from conversations. When `
 3. If the LLM says store, it returns refined memory text with category and importance
 4. If LLM is unavailable, falls back to the heuristic capture
 
-**LLM endpoint:** By default, Vidya calls the OpenClaw gateway (`localhost:3000/v1/chat/completions`). Set `captureLlmUrl` to use any OpenAI-compatible endpoint:
+**LLM endpoint:** By default, Vidya calls the OpenClaw gateway (`localhost:3000/v1/chat/completions`). Set `captureLlmUrl` to use any OpenAI-compatible endpoint.
+
+**Authentication:** External LLM APIs (OpenAI, etc.) require an API key. Set `captureLlmApiKey` to send a `Bearer` token with each request. The field supports `${ENV_VAR}` syntax. If omitted, Vidya falls back to the `OPENCLAW_LLM_API_KEY` or `OPENAI_API_KEY` environment variables. No auth header is sent when the key is empty (suitable for local gateways).
 
 ```json
 {
   "captureLlm": true,
   "captureLlmModel": "anthropic/claude-haiku-4-5-20251001",
-  "captureLlmUrl": "https://api.openai.com"
+  "captureLlmUrl": "https://api.openai.com",
+  "captureLlmApiKey": "${OPENAI_API_KEY}"
 }
 ```
 
