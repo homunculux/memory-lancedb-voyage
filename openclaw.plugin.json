@@ -1,5 +1,5 @@
 {
-  "id": "memory-lancedb-voyage",
+  "id": "vidya",
   "name": "Memory (LanceDB + Voyage AI)",
   "description": "LanceDB-backed long-term memory with hybrid retrieval, Voyage AI embedding & reranking, multi-scope isolation",
   "version": "2026.2.25",

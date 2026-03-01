@@ -39,6 +39,7 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist/",
+    "openclaw.plugin.json",
     "README.md",
     "LICENSE",
     "config.example.json"

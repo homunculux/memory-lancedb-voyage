@@ -1,5 +1,5 @@
 {
-  "_comment": "Vidya — Example plugin config for openclaw.json under plugins.entries.memory-lancedb-voyage.config",
+  "_comment": "Vidya — Example plugin config for openclaw.json under plugins.entries.vidya.config",
 
   "embedding": {
     "provider": "voyage",
