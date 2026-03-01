@@ -111,6 +111,7 @@ async function callLlmForCaptureJudgment(
   model: string,
   logger: { info: (msg: string) => void; warn: (msg: string) => void; debug?: (msg: string) => void },
   configuredLlmUrl?: string,
+  captureLlmApiKey?: string,
 ): Promise<LlmMemoryJudgment | null> {
   // Try configured URL first, then env var, then default fallbacks
   //
@@ -160,9 +161,14 @@ async function callLlmForCaptureJudgment(
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10_000);
 
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (captureLlmApiKey) {
+        headers["Authorization"] = `Bearer ${captureLlmApiKey}`;
+      }
+
       const response = await fetch(`${baseUrl}/v1/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: requestBody,
         signal: controller.signal,
       });
@@ -544,6 +550,7 @@ const memoryLanceDBVoyagePlugin = {
               config.captureLlmModel,
               api.logger,
               config.captureLlmUrl || undefined,
+              config.captureLlmApiKey || undefined,
             );
 
             // Mark as judged regardless of outcome (avoid re-judging same content)
