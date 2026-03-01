@@ -28,7 +28,7 @@
   },
   "openclaw": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ]
   },
   "devDependencies": {
@@ -39,8 +39,6 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist/",
-    "index.js",
-    "index.ts",
     "README.md",
     "LICENSE",
     "config.example.json"
