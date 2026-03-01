@@ -960,6 +960,97 @@ describe("LLM Capture Config", () => {
 });
 
 // ============================================================================
+// 7b. callLlmForCaptureJudgment Authorization header
+// ============================================================================
+
+import { callLlmForCaptureJudgment } from "../index.js";
+
+describe("callLlmForCaptureJudgment Authorization header", () => {
+  const originalFetch = globalThis.fetch;
+  const savedGatewayUrl = process.env.OPENCLAW_GATEWAY_URL;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (savedGatewayUrl !== undefined) {
+      process.env.OPENCLAW_GATEWAY_URL = savedGatewayUrl;
+    } else {
+      delete process.env.OPENCLAW_GATEWAY_URL;
+    }
+  });
+
+  const noop = () => {};
+  const logger = { info: noop, warn: noop, debug: noop };
+
+  const llmOkResponse = {
+    choices: [{ message: { content: JSON.stringify({ store: false }) } }],
+  };
+
+  it("no Authorization header when captureLlmApiKey is empty", async () => {
+    let capturedHeaders: Record<string, string> = {};
+    // Prevent env-based fallback URLs from interfering
+    delete process.env.OPENCLAW_GATEWAY_URL;
+
+    globalThis.fetch = (async (_url: any, opts: any) => {
+      capturedHeaders = opts.headers;
+      return { ok: true, status: 200, json: async () => llmOkResponse };
+    }) as unknown as typeof fetch;
+
+    await callLlmForCaptureJudgment(
+      "test conversation",
+      "test-model",
+      logger,
+      "http://localhost:9999",
+      "",
+    );
+
+    assert.equal(capturedHeaders["Content-Type"], "application/json");
+    assert.equal(capturedHeaders["Authorization"], undefined);
+  });
+
+  it("no Authorization header when captureLlmApiKey is undefined", async () => {
+    let capturedHeaders: Record<string, string> = {};
+    delete process.env.OPENCLAW_GATEWAY_URL;
+
+    globalThis.fetch = (async (_url: any, opts: any) => {
+      capturedHeaders = opts.headers;
+      return { ok: true, status: 200, json: async () => llmOkResponse };
+    }) as unknown as typeof fetch;
+
+    await callLlmForCaptureJudgment(
+      "test conversation",
+      "test-model",
+      logger,
+      "http://localhost:9999",
+      undefined,
+    );
+
+    assert.equal(capturedHeaders["Content-Type"], "application/json");
+    assert.equal(capturedHeaders["Authorization"], undefined);
+  });
+
+  it("sends Authorization: Bearer <key> when captureLlmApiKey is set", async () => {
+    let capturedHeaders: Record<string, string> = {};
+    delete process.env.OPENCLAW_GATEWAY_URL;
+
+    globalThis.fetch = (async (_url: any, opts: any) => {
+      capturedHeaders = opts.headers;
+      return { ok: true, status: 200, json: async () => llmOkResponse };
+    }) as unknown as typeof fetch;
+
+    await callLlmForCaptureJudgment(
+      "test conversation",
+      "test-model",
+      logger,
+      "http://localhost:9999",
+      "sk-test-secret-key",
+    );
+
+    assert.equal(capturedHeaders["Content-Type"], "application/json");
+    assert.equal(capturedHeaders["Authorization"], "Bearer sk-test-secret-key");
+  });
+});
+
+// ============================================================================
 // Phase 1 — Pure Functions
 // ============================================================================
 
