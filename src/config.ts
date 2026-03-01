@@ -221,11 +221,9 @@ export const memoryConfigSchema = {
       captureLlmUrl: typeof cfg.captureLlmUrl === "string"
         ? normalizeBaseUrl(cfg.captureLlmUrl)
         : "",
-      captureLlmApiKey: resolveEnvVars(
-        typeof cfg.captureLlmApiKey === "string"
-          ? cfg.captureLlmApiKey
-          : process.env.OPENCLAW_LLM_API_KEY || process.env.OPENAI_API_KEY || "",
-      ),
+      captureLlmApiKey: typeof cfg.captureLlmApiKey === "string"
+        ? resolveEnvVars(cfg.captureLlmApiKey)
+        : process.env.OPENCLAW_LLM_API_KEY || "",
       enableManagementTools: cfg.enableManagementTools === true,
       retrieval: {
         mode: ret.mode === "vector" ? "vector" : "hybrid",

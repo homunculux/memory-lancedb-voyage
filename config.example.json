@@ -36,8 +36,8 @@
   "captureLlm": true,
   "captureLlmModel": "anthropic/claude-haiku-4-5-20251001",
   "captureLlmUrl": "",
-  "captureLlmApiKey": "${OPENAI_API_KEY}",
-  "_comment_llm": "LLM judges whether conversation content is worth storing. Falls back to heuristic if LLM unavailable. captureLlmUrl is the base URL (without /v1/chat/completions) — the plugin appends the path automatically. captureLlmApiKey is sent as a Bearer token; supports ${ENV_VAR} syntax. Falls back to OPENCLAW_LLM_API_KEY or OPENAI_API_KEY env vars.",
+  "captureLlmApiKey": "",
+  "_comment_llm": "LLM judges whether conversation content is worth storing. Falls back to heuristic if LLM unavailable. captureLlmUrl is the base URL (without /v1/chat/completions) — the plugin appends the path automatically. captureLlmApiKey is only needed for external endpoints (e.g. \"${OPENCLAW_LLM_API_KEY}\"); sent as a Bearer token. Falls back to OPENCLAW_LLM_API_KEY env var. Leave empty for local gateways.",
 
   "enableManagementTools": false,
   "_comment_tools": "Set true to enable memory_list and memory_stats tools (useful for debugging)",

@@ -164,14 +164,14 @@ Vidya can automatically capture important information from conversations. When `
 
 **LLM endpoint:** By default, Vidya calls the OpenClaw gateway (`localhost:3000/v1/chat/completions`). Set `captureLlmUrl` to use any OpenAI-compatible endpoint.
 
-**Authentication:** External LLM APIs (OpenAI, etc.) require an API key. Set `captureLlmApiKey` to send a `Bearer` token with each request. The field supports `${ENV_VAR}` syntax. If omitted, Vidya falls back to the `OPENCLAW_LLM_API_KEY` or `OPENAI_API_KEY` environment variables. No auth header is sent when the key is empty (suitable for local gateways).
+**Authentication:** External LLM APIs (OpenAI, etc.) require an API key. Set `captureLlmApiKey` to send a `Bearer` token with each request. The field supports `${ENV_VAR}` syntax. If omitted, Vidya falls back to the `OPENCLAW_LLM_API_KEY` environment variable. No auth header is sent when the key is empty (suitable for local gateways).
 
 ```json
 {
   "captureLlm": true,
   "captureLlmModel": "anthropic/claude-haiku-4-5-20251001",
   "captureLlmUrl": "https://api.openai.com",
-  "captureLlmApiKey": "${OPENAI_API_KEY}"
+  "captureLlmApiKey": "${OPENCLAW_LLM_API_KEY}"
 }
 ```
 
